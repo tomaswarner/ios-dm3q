@@ -113,7 +113,7 @@ static void cs(int high)
 	wr(io, (rd(io) & ~2u) | (high ? 2u : 0u));
 }
 
-static uint32_t last_fail_status, last_fail_irq, last_fail_fifo;
+static uint32_t last_fail_status, last_fail_irq, last_fail_fifo, after_tx_status, after_tx_fifo;
 
 /* One full-duplex FIFO transfer of n (<= 64) bytes, CS held low around it. */
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
@@ -123,11 +123,19 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 	wr(SE + SE_M_IRQ_CLR, 0xffffffffu);
 	wr(SE + SE_SPI_TXLEN, n);
 	wr(SE + SE_SPI_RXLEN, n);
-	wr(SE + SE_TX_WM, 1);
 	cs(0);
 	udelay(2);
 	wr(SE + SE_M_CMD, SPI_TX_RX << 27);
 	unsigned sent = 0, got = 0;
+	while (sent < n && sent < 64) {			/* 16-word FIFO: the whole message */
+		uint32_t w = 0;
+		for (unsigned j = 0; j < 4 && sent + j < n; j++)
+			w |= (uint32_t)tx[sent + j] << (8 * j);
+		wr(SE + SE_TXFIFO, w);
+		sent += 4;
+	}
+	after_tx_status = rd(SE + SE_STATUS);
+	after_tx_fifo = rd(SE + SE_TXFIFO_ST);
 	uint64_t end = ticks() + 19200000 / 10;		/* 100 ms */
 	int rc = -2;
 	while (ticks() < end) {
@@ -233,6 +241,7 @@ void touch_probe(void)
 	/* 2. SE identity */
 	uint32_t fw = rd(SE + SE_FW_REV);
 	con_hex2("SE4", "fwrev=", fw, "status=", rd(SE + SE_STATUS));
+	con_hex2("SE4", "ifdis=", rd(SE + 0x064), "qupver=", rd(0x00ac0000 + 0x4));	/* GENI_IF_DISABLE_RO; QUPV3_HW_VER */
 	con_hex2("SE4", "hwp0=", rd(SE + SE_HW_PARAM0), "clksel/mclk=", rd(SE + SE_CLK_SEL) << 16 | (rd(SE + SE_MCLK_CFG) & 0xffff));
 	if (((fw >> 8) & 0xff) != 1) {
 		con_str("SE4", "protocol is not SPI (1): stop");
@@ -284,6 +293,7 @@ void touch_probe(void)
 	con_hex2("STM RST", "rc/ready=", (uint32_t)rc << 8 | ready, "tries=", tries);
 	con_hex2("SPI FAIL", "st/irq=", last_fail_status << 16 | (last_fail_irq & 0xffff), "fifo t/r=", last_fail_fifo);
 	con_hex2("SPI FAIL", "irqhi=", last_fail_irq >> 16, "irqen=", rd(SE + SE_M_IRQ_EN));
+	con_hex2("SPI TX", "st after=", after_tx_status, "txfifo=", after_tx_fifo);
 	con_hex2("STM EV", "", be(ev, 0, 1, 2, 3), "", be(ev, 4, 5, 6, 7));
 	uint8_t id[8] = { 0 };
 	rc = stm_read_reg(0x22, id, 5);		/* STM_TS_READ_DEVICE_ID */
