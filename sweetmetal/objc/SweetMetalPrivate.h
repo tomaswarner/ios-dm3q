@@ -22,13 +22,16 @@
  * run collects every gap. SWEETMETAL_STRICT=1 restores Metal's exception. A method of a private
  * superclass that is abstract (doesNotRecognizeSelector from inside _MTLDevice) still throws. */
 void sm_log_missing(id obj, SEL sel);
+NSMethodSignature *sm_fake_signature(SEL sel);  /* id return, one word argument per ':' */
 BOOL sm_strict(void);
+BOOL sm_trace(void);
+#define SMTRACE(...) do { if (sm_trace()) SMLOG("trace " __VA_ARGS__); } while (0)
 
 #define MISSING_LOGGER \
 	-(NSMethodSignature *)methodSignatureForSelector:(SEL)sel \
 	{ \
 		NSMethodSignature *sig = [super methodSignatureForSelector:sel]; \
-		return sig || sm_strict() ? sig : [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
+		return sig || sm_strict() ? sig : sm_fake_signature(sel); \
 	} \
 	-(void)forwardInvocation:(NSInvocation *)inv \
 	{ \
@@ -56,6 +59,11 @@ NSError *sm_error(NSString *what);
 @property (readonly) sm_command_buffer *sm;
 @property (readonly) NSMutableArray *held;  /* resources kept alive until completion */
 - (instancetype)initWithQueue:(id<MTLCommandQueue>)queue cb:(sm_command_buffer *)cb;
+@end
+
+@interface SweetMTLCommandQueue : NSObject <MTLCommandQueue>
+- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(sm_queue *)q;
+- (dispatch_queue_t)completionQueue;
 @end
 
 @interface SweetMTLDevice : _MTLDevice <MTLDevice>

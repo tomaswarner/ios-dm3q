@@ -65,6 +65,7 @@
 - (BOOL)isFramebufferOnly { return NO; }
 - (BOOL)isShareable { return NO; }
 - (IOSurfaceRef)iosurface { return _surface; }
+- (uint64_t)protectionOptions { return 0; }
 - (NSUInteger)iosurfacePlane { return _plane; }
 - (id<MTLTexture>)parentTexture { return nil; }
 - (id<MTLBuffer>)buffer { return nil; }
@@ -210,13 +211,17 @@ static void release_surface(void *bytes, uint64_t length, void *ctx)
 
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
 {
+	SMTRACE("texture %lux%lu fmt %lu usage %lx", (unsigned long)d.width, (unsigned long)d.height,
+		(unsigned long)d.pixelFormat, (unsigned long)d.usage);
 	sm_texture_desc td = texture_desc(d);
 	sm_texture *t = sm_texture_new(self.sm, &td);
 	if (!t) {
 		sm_error(@"newTextureWithDescriptor");
 		return nil;
 	}
-	return [[SweetMTLTexture alloc] initWithDevice:self texture:t descriptor:d];
+	SweetMTLTexture *tex = [[SweetMTLTexture alloc] initWithDevice:self texture:t descriptor:d];
+	SMTRACE("  -> texture %p storage %lu", (__bridge void *)tex, (unsigned long)d.storageMode);
+	return tex;
 }
 
 /* A surface's plane: the surface's pages as a no-copy buffer (the runtime shares one import among
@@ -297,6 +302,8 @@ static sm_stencil_desc stencil_desc(MTLStencilDescriptor *s)
 
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)error
 {
+	SMTRACE("render pipeline %s/%s color0 %lu", d.vertexFunction.name.UTF8String, d.fragmentFunction.name.UTF8String,
+		(unsigned long)d.colorAttachments[0].pixelFormat);
 	sm_library *libs[2] = { NULL, NULL };
 	sm_function *fns[2] = { NULL, NULL };
 	sm_render_pipeline *p = NULL;
@@ -406,6 +413,7 @@ fail:
 
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)s
 {
+	SMTRACE("set pipeline %p", (__bridge void *)s);
 	HOLD(s);
 	CHECK(sm_render_set_pipeline(_e, ((SweetMTLRenderPipelineState *)s).sm), "setRenderPipelineState");
 }
@@ -528,6 +536,7 @@ fail:
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)start vertexCount:(NSUInteger)n
 	 instanceCount:(NSUInteger)inst baseInstance:(NSUInteger)base
 {
+	SMTRACE("draw prim %lu start %lu count %lu x%lu", (unsigned long)t, (unsigned long)start, (unsigned long)n, (unsigned long)inst);
 	CHECK(sm_render_draw(_e, (uint32_t)t, (uint32_t)start, (uint32_t)n, (uint32_t)inst, (uint32_t)base), "drawPrimitives");
 }
 
@@ -545,6 +554,7 @@ fail:
 		  indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)off instanceCount:(NSUInteger)inst
 		   baseVertex:(NSInteger)bv baseInstance:(NSUInteger)bi
 {
+	SMTRACE("drawIndexed prim %lu count %lu type %lu x%lu", (unsigned long)t, (unsigned long)n, (unsigned long)it, (unsigned long)inst);
 	HOLD(ib);
 	CHECK(sm_render_draw_indexed(_e, (uint32_t)t, (uint32_t)n, (uint32_t)it, ((SweetMTLBuffer *)ib).sm, off,
 				     (uint32_t)inst, (int32_t)bv, (uint32_t)bi), "drawIndexedPrimitives");
@@ -686,6 +696,8 @@ static sm_pass_depth_stencil pass_ds(MTLRenderPassAttachmentDescriptor *a, doubl
 
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d
 {
+	SMTRACE("render pass color0 %p load %lu store %lu", (__bridge void *)d.colorAttachments[0].texture,
+		(unsigned long)d.colorAttachments[0].loadAction, (unsigned long)d.colorAttachments[0].storeAction);
 	sm_render_pass_desc pass;
 	memset(&pass, 0, sizeof pass);
 	for (int i = 0; i < 8; i++) {

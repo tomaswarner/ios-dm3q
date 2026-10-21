@@ -414,6 +414,23 @@
   cull, winding, bias, fill, blend color, draw/drawIndexed), blit encoder, newBufferWithBytesNoCopy. **Phone:**
   render into a real IOSurface (IOSurfaceCreate 'RGBA', 64 B rows) 64/64; vertex descriptor + D32S8 depth/
   stencil + cull 64/64; texture sampling + blit readback 64/64; MTL_PROBE OK.
+  **xnu 0109 (IOAcceleratorES nub, sweetmetal=1):** CI 39685432940 done (not downloaded/flashed yet).
+  **🎉 COREANIMATION RENDERS ON SWEETMETAL (2026-10-21 ~20:00, no flash, `objc/ca_probe.m` via sweetrun):**
+  Metal exports `MTLAddDevice`: after MTLCreateSystemDefaultDevice() (initializes the empty device array),
+  MTLAddDevice(ourDevice) makes MTLCreateSystemDefaultDevice return OURS in that process (asserts the device
+  conforms to MTLDeviceSPI -> class_addProtocol at +load from Metal's registered protocols; it then runs
+  _MTLDevice initLimits/initFeatureQueries). +[CARenderer rendererWithMTLTexture:options:] then runs CA's
+  Metal renderer (CA::OGL::MetalContext) on our device: pipelines fixed_vert_lph_spc/fixed_frag_lph_cpf from
+  QuartzCore's metallib through bitcodeData -> metal2vulkan, drawIndexed/draw, commitAndWaitUntilSubmitted.
+  Readback of a 64x64 BGRA target: blue rounded square (corner pixel stays red), red background, 50% green
+  bar blended 0,128,127 - exact. Gaps fixed on the way: featureProfile (AGXA11FamilyDevice = 5),
+  newPipelineLibraryWithFilePath:error: -> nil (Apple's builder segfaulted), set{Submission,Completion}Queue:
+  (handlers on CA's completion queue, wait on a global queue), setProtectionOptions:/protectionOptions,
+  commitAndWaitUntilSubmitted, supportsVertexAmplificationCount:. Missing-selector fallback now fakes one
+  word argument per ':'. Tracing: SWEETMETAL_TRACE=1. Note: CA recreates identical pipelines per draw
+  (no cache yet) and the first frame takes seconds (lavapipe JIT).
+  For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
+  into backboardd (launchd env, needs a reboot).
   NEXT: the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)

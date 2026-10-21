@@ -12,6 +12,7 @@
  * encoders. Any selector a client sends that is not implemented is logged with its class
  * (SWEETMETAL missing: ...) before the usual exception, to drive what comes next. */
 #import "SweetMetalPrivate.h"
+#import <objc/runtime.h>
 
 BOOL sm_strict(void)
 {
@@ -21,6 +22,25 @@ BOOL sm_strict(void)
 		strict = v && *v == '1';
 	}
 	return strict;
+}
+
+BOOL sm_trace(void)
+{
+	static int trace = -1;
+	if (trace < 0) {
+		const char *v = getenv("SWEETMETAL_TRACE");
+		trace = v && *v == '1';
+	}
+	return trace;
+}
+
+NSMethodSignature *sm_fake_signature(SEL sel)
+{
+	char types[64] = "@@:";
+	for (const char *c = sel_getName(sel); *c && strlen(types) < sizeof types - 1; c++)
+		if (*c == ':')
+			strcat(types, "Q");
+	return [NSMethodSignature signatureWithObjCTypes:types];
 }
 
 void sm_log_missing(id obj, SEL sel)
@@ -261,6 +281,7 @@ MISSING_LOGGER
 
 - (void)commit
 {
+	SMTRACE("commit %p", self);
 	_status = MTLCommandBufferStatusCommitted;
 	if (!sm_command_buffer_commit(_cb)) {
 		_error = sm_error(@"commit");
@@ -271,6 +292,8 @@ MISSING_LOGGER
 	_status = MTLCommandBufferStatusScheduled;
 	for (MTLCommandBufferHandler h in _scheduled)
 		h(self);
+	/* wait off the client's queues, then run the handlers on the queue's completion queue */
+	dispatch_queue_t handlers = [(SweetMTLCommandQueue *)_queue completionQueue];
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 		if (!sm_command_buffer_wait(self->_cb)) {
 			self->_error = sm_error(@"command buffer");
@@ -278,14 +301,21 @@ MISSING_LOGGER
 		} else {
 			self->_status = MTLCommandBufferStatusCompleted;
 		}
-		for (MTLCommandBufferHandler h in self->_completed)
-			h(self);
-		[self->_held removeAllObjects];
-		dispatch_semaphore_signal(self->_done);
+		SMTRACE("completed %p status %ld", (__bridge void *)self, (long)self->_status);
+		dispatch_async(handlers, ^{
+			for (MTLCommandBufferHandler h in self->_completed)
+				h(self);
+			[self->_held removeAllObjects];
+			dispatch_semaphore_signal(self->_done);
+		});
 	});
 }
 
 - (void)waitUntilScheduled { }
+/* SPI CoreAnimation commits with: the work is submitted by the time commit returns here */
+- (void)commitAndWaitUntilSubmitted { [self commit]; }
+- (void)setProtectionOptions:(uint64_t)o { }
+- (uint64_t)protectionOptions { return 0; }
 
 - (void)waitUntilCompleted
 {
@@ -300,13 +330,11 @@ MISSING_LOGGER
 MISSING_LOGGER
 @end
 
-@interface SweetMTLCommandQueue : NSObject <MTLCommandQueue>
-- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(sm_queue *)q;
-@end
 
 @implementation SweetMTLCommandQueue {
 	id<MTLDevice> _device;
 	sm_queue *_q;
+	dispatch_queue_t _completion;
 }
 @synthesize label;
 
@@ -336,6 +364,16 @@ MISSING_LOGGER
 	return [[SweetMTLCommandBuffer alloc] initWithQueue:self cb:cb];
 }
 
+/* SPI: where completion handlers run (CoreAnimation sets its own) */
+- (void)setCompletionQueue:(dispatch_queue_t)q { _completion = q; }
+- (dispatch_queue_t)completionQueue
+{
+	return _completion ?: dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+}
+- (void)setSubmissionQueue:(dispatch_queue_t)q { }
+- (void)setGPUPriority:(NSUInteger)p { }
+- (void)setBackgroundGPUPriority:(NSUInteger)p { }
+
 - (id<MTLCommandBuffer>)commandBufferWithUnretainedReferences { return [self commandBuffer]; }
 - (id<MTLCommandBuffer>)commandBufferWithDescriptor:(MTLCommandBufferDescriptor *)d { return [self commandBuffer]; }
 - (void)insertDebugCaptureBoundary { }
@@ -350,6 +388,31 @@ MISSING_LOGGER
 }
 
 - (sm_device *)sm { return _dev; }
+
+/* Metal's private protocols (MTLAddDevice asserts MTLDeviceSPI); added at run time from the
+ * protocols Metal registers, as the SDK has no headers for them. */
++ (void)load
+{
+	static const char *pairs[][2] = {
+		{ "SweetMTLDevice", "MTLDeviceSPI" }, { "SweetMTLBuffer", "MTLBufferSPI" },
+		{ "SweetMTLTexture", "MTLTextureSPI" }, { "SweetMTLCommandQueue", "MTLCommandQueueSPI" },
+		{ "SweetMTLCommandBuffer", "MTLCommandBufferSPI" },
+		{ "SweetMTLComputePipelineState", "MTLComputePipelineStateSPI" },
+		{ "SweetMTLRenderPipelineState", "MTLRenderPipelineStateSPI" },
+		{ "SweetMTLSamplerState", "MTLSamplerStateSPI" }, { "SweetMTLDepthStencilState", "MTLDepthStencilStateSPI" },
+		{ "SweetMTLRenderCommandEncoder", "MTLRenderCommandEncoderSPI" },
+		{ "SweetMTLComputeCommandEncoder", "MTLComputeCommandEncoderSPI" },
+		{ "SweetMTLBlitCommandEncoder", "MTLBlitCommandEncoderSPI" },
+	};
+	for (size_t i = 0; i < sizeof pairs / sizeof pairs[0]; i++) {
+		Class c = objc_getClass(pairs[i][0]);
+		Protocol *p = objc_getProtocol(pairs[i][1]);
+		if (c && p)
+			class_addProtocol(c, p);
+		else
+			SMLOG("no protocol %s for %s", pairs[i][1], pairs[i][0]);
+	}
+}
 
 - (instancetype)initWithAcceleratorPort:(unsigned int)port
 {
@@ -368,6 +431,19 @@ MISSING_LOGGER
 }
 
 - (NSString *)name { return _name; }
+- (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count == 1; }
+/* AGXA11FamilyDevice answers 5 */
+- (NSUInteger)featureProfile { return 5; }
+
+/* AGX's precompiled pipeline caches (CoreAnimation asks for its own); none here. */
+- (id)newPipelineLibraryWithFilePath:(NSString *)path error:(NSError **)error
+{
+	if (error)
+		*error = [NSError errorWithDomain:@"SweetMetal" code:3
+					 userInfo:@{ NSLocalizedDescriptionKey : @"no pipeline libraries" }];
+	return nil;
+}
+
 - (uint64_t)registryID { return 0x53574554; }
 - (MTLSize)maxThreadsPerThreadgroup { return MTLSizeMake(1024, 1024, 1024); }
 - (BOOL)isLowPower { return NO; }
@@ -432,6 +508,7 @@ MISSING_LOGGER
 
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function error:(NSError **)error
 {
+	SMTRACE("compute pipeline %s", function.name.UTF8String);
 	sm_library *lib = [self airLibraryFor:function error:error];
 	sm_function *fn = lib ? sm_library_function(lib, function.name.UTF8String) : NULL;
 	sm_compute_pipeline *pso = fn ? sm_compute_pipeline_new(_dev, fn) : NULL;
