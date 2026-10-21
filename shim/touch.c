@@ -108,6 +108,112 @@ static void gpio_cfg(unsigned pin, unsigned func, unsigned drive_code, int out, 
 	wr(cfg, v);
 }
 
+/*
+ * Touch power: S2DOS05 (display PMIC) LDO2 = tsp_io 1.8 V, LDO3 = tsp_avdd 3.0 V,
+ * on sw_i2c0 = i2c-gpio, SDA GPIO20 / SCL GPIO21, 100 kHz, address 0x60
+ * (include/linux/regulator/s2dos05.h: EN reg 0x03, L2 bit 1, L3 bit 2).
+ * touch19: SE loopback echoed the pattern, yet FB 20 00 00 00 (HW id) read
+ * all zero: the IC is not powered.  Open-drain by toggling OE (external pull-ups).
+ */
+#define I2C_SDA		20
+#define I2C_SCL		21
+#define S2DOS05_ADDR	0x60
+
+static void od(unsigned pin, int high)		/* high = release (input), low = drive 0 */
+{
+	uintptr_t cfg = TLMM + pin * 0x1000UL, io = cfg + 4;
+	wr(io, rd(io) & ~2u);
+	wr(cfg, (rd(cfg) & ~0x3ffu) | (high ? 0u : 0x200u));	/* gpio, 2 mA, bias-disable */
+}
+static int od_in(unsigned pin) { return rd(TLMM + pin * 0x1000UL + 4) & 1; }
+static void i2c_dly(void) { udelay(5); }
+
+static void i2c_start(void)
+{
+	od(I2C_SDA, 1); od(I2C_SCL, 1); i2c_dly();
+	od(I2C_SDA, 0); i2c_dly();
+	od(I2C_SCL, 0); i2c_dly();
+}
+static void i2c_stop(void)
+{
+	od(I2C_SDA, 0); i2c_dly();
+	od(I2C_SCL, 1); i2c_dly();
+	od(I2C_SDA, 1); i2c_dly();
+}
+static int i2c_wbyte(uint8_t b)			/* returns 1 on ACK */
+{
+	for (int i = 7; i >= 0; i--) {
+		od(I2C_SDA, (b >> i) & 1); i2c_dly();
+		od(I2C_SCL, 1); i2c_dly();
+		for (int t = 0; t < 1000 && !od_in(I2C_SCL); t++)	/* clock stretching */
+			udelay(1);
+		od(I2C_SCL, 0);
+	}
+	od(I2C_SDA, 1); i2c_dly();
+	od(I2C_SCL, 1); i2c_dly();
+	int ack = !od_in(I2C_SDA);
+	od(I2C_SCL, 0); i2c_dly();
+	return ack;
+}
+static uint8_t i2c_rbyte(int ack)
+{
+	uint8_t b = 0;
+	od(I2C_SDA, 1);
+	for (int i = 0; i < 8; i++) {
+		i2c_dly();
+		od(I2C_SCL, 1); i2c_dly();
+		b = (uint8_t)(b << 1 | od_in(I2C_SDA));
+		od(I2C_SCL, 0);
+	}
+	od(I2C_SDA, !ack); i2c_dly();
+	od(I2C_SCL, 1); i2c_dly();
+	od(I2C_SCL, 0);
+	od(I2C_SDA, 1);
+	return b;
+}
+static int pmic_rd(uint8_t reg, uint8_t *v)
+{
+	i2c_start();
+	int ok = i2c_wbyte(S2DOS05_ADDR << 1) && i2c_wbyte(reg);
+	if (ok) {
+		i2c_start();
+		ok = i2c_wbyte(S2DOS05_ADDR << 1 | 1);
+		if (ok)
+			*v = i2c_rbyte(0);
+	}
+	i2c_stop();
+	return ok ? 0 : -1;
+}
+static int pmic_wr(uint8_t reg, uint8_t v)
+{
+	i2c_start();
+	int ok = i2c_wbyte(S2DOS05_ADDR << 1) && i2c_wbyte(reg) && i2c_wbyte(v);
+	i2c_stop();
+	return ok ? 0 : -1;
+}
+
+static void touch_power(void)
+{
+	uint8_t id = 0, en = 0, c2 = 0, c3 = 0;
+	od(I2C_SDA, 1); od(I2C_SCL, 1);
+	udelay(100);
+	int rc = pmic_rd(0x00, &id);
+	rc |= pmic_rd(0x03, &en);
+	rc |= pmic_rd(0x05, &c2);
+	rc |= pmic_rd(0x06, &c3);
+	con_hex2("S2DOS05", "rc/id=", (uint32_t)(rc & 0xff) << 8 | id, "en/l2/l3=", (uint32_t)en << 16 | c2 << 8 | c3);
+	if (rc)
+		return;				/* no ACK: do not write anything */
+	if ((en & 0x06) != 0x06) {
+		int wrc = pmic_wr(0x03, en | 0x06);	/* RMW: only add LDO2 + LDO3 */
+		udelay(50000);
+		uint8_t en2 = 0;
+		pmic_rd(0x03, &en2);
+		con_hex2("S2DOS05", "write rc=", (uint32_t)wrc, "en now=", en2);
+		udelay(100000);			/* IC boot after power-up */
+	}
+}
+
 static void cs(int high)
 {
 	uintptr_t io = TLMM + 47 * 0x1000UL + 4;
@@ -657,6 +763,9 @@ void touch_probe(void)
 	con_hex2("GPI", "init=", gpi_init_rc, "ch/ev st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
 
 	con_hex2("PINS", "irq25=", rd(TLMM + 25 * 0x1000UL + 4) & 1, "cs47=", rd(TLMM + 47 * 0x1000UL + 4));
+
+	/* 3a. touch IC power (S2DOS05 LDO2/LDO3) */
+	touch_power();
 
 	/* 3b. SoC-side check: SE loopback must echo the pattern */
 	{
