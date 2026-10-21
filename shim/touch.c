@@ -442,8 +442,13 @@ static uint32_t last_fail_status, last_fail_irq, last_fail_fifo, after_tx_status
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 {
 	if (gpi_ok) {
+		/* touch16: a 6-byte TX shifted 4 bytes (GP_LENGTH 4, TX FIFO empty) and
+		 * waited forever for the rest: the partial last FIFO word never reaches
+		 * the serializer.  Pad every GPI transfer to whole 32-bit words. */
+		unsigned n_req = n;
+		n = (n + 3) & ~3u;
 		for (unsigned i = 0; i < n; i++) {
-			dma_tx[i] = tx[i];
+			dma_tx[i] = i < n_req ? tx[i] : 0;
 			dma_rx[i] = 0xee;
 		}
 		dcache_flush(dma_tx, sizeof(dma_tx));
@@ -475,7 +480,7 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 			con_hex2("SE A", "spi txlen=", rd(SE + SE_SPI_TXLEN), "rxlen=", rd(SE + SE_SPI_RXLEN));
 			con_hex2("SE A", "trans cfg=", rd(SE + SE_SPI_TRANS), "wordlen=", rd(SE + SE_SPI_WORDLEN));
 			con_hex2("SE A", "pre/post dly=", rd(SE + 0x274), "dly cnt=", rd(SE + 0x278));
-			con_hex2("SE A", "loopback=", rd(SE + 0x22c), "s clk=", rd(SE + 0x04c));
+			con_hex2("SE A", "txpack0=", rd(SE + SE_TX_PACK0), "txpack1=", rd(SE + SE_TX_PACK1));
 			wr(SE + SE_M_IRQ_CLR, rd(SE + SE_M_IRQ));
 			udelay(1500000);
 			ch_queue(0, tx_cfg, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
@@ -503,7 +508,7 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		udelay(2);
 		cs(1);
 		dcache_flush(dma_rx, sizeof(dma_rx));
-		for (unsigned i = 0; i < n; i++)
+		for (unsigned i = 0; i < n_req; i++)
 			rx[i] = dma_rx[i];
 		if (done != 3) {
 			last_fail_status = (uint32_t)done;
