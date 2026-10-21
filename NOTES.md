@@ -357,7 +357,9 @@
   `sm_texture_new_iosurface` (Buffer::new_texture_with_iosurface_plane: offset, bytes_per_row, planar).
   The bundle maps an IOSurface as a no-copy buffer at IOSurfaceGetBaseAddress and makes plane textures over
   it. smoke `surface`: render into a texture over mmap'd host pages (plane at 256, rows 64 B apart) -> CPU
-  sees 64/64 texels in the pages, padding untouched, deallocator ran. Host OK; phone pending (same command).
+  sees 64/64 texels in the pages, padding untouched, deallocator ran. Host OK; **phone OK too (2026-10-21, sweetrun, boot x20s + root test4):** compute 1024/1024, render 64/64,
+  texture 256/256, surface 64/64 (0 padding touched, deallocator ran), depth 64/64, SWEETMETAL OK. USB only
+  enumerates if the cable is in at boot (confirmed again: force restart Vol-+Power with the cable plugged).
   **Metal device registration RE (iOS 16.7 20H392 Metal, done 2026-10-21 ~19:30, `ipsw dyld disass`):**
   MTLCreateSystemDefaultDevice block 0x181a37050 returns `_deviceArray[0]` when exactly one device (else
   MTLReportFailure). The array is filled once by MTLDeviceArrayInitialize (0x181a34050: env/defaults for
