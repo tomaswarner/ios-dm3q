@@ -205,6 +205,9 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **🎉 2026-10-21 ~02:40 local: TOUCH WORKS IN iOS on the S23 Ultra** (boot x10s, kernel out-dm3q-006,
+  sweettouch=2): user reports the touch works on the lock screen / home screen. Next: buttons (PMK8550 PON
+  KPDPWR/RESIN + vol+ GPIO), RTC, UFS HS-G2+, USB live log, battery.
 - **Kernel touch (0104, CI 39549169807 -> `xnu/out-dm3q-006`):** `bsd/dev/sweet_stm.c` (sweettouch=2) = the
   shim recipe in xnu (kmem_alloc_contig DMA page, clean/flush_dcache64, 8 ms polling thread after
   sweettouchdelay 45 s), maps 0..4095 -> panel 1440x3088 -> presented 1125x2436 (sweetfb_fill: x*1125/1440,
