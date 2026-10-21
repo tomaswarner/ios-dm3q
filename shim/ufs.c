@@ -443,7 +443,12 @@ static void abl_list_dump(uintptr_t list)
 		shown++;
 		con_hex2("ABL UTRD", "dw0=", d[0], "ocs=", d[2]);
 		con_hex2("", "ucd=", ucdba, "resp/prdt=", (d[6] >> 16) << 16 | (d[7] & 0xffff));
-		volatile uint8_t *c = (volatile uint8_t *)(((uintptr_t)d[5] << 32) | ucdba);
+		/* dm3q ufs3: ABL frees its list at exit; UEFI fills freed pool with 0xAF */
+		if (ucdba == 0xafafafafu || d[5] || ucdba < 0x80000000u || (ucdba & 0x7f)) {
+			con_str("", ucdba == 0xafafafafu ? "freed by ABL (0xAF fill)" : "ucd pointer invalid");
+			continue;
+		}
+		volatile uint8_t *c = (volatile uint8_t *)(uintptr_t)ucdba;
 		con_hex2("", "upiu=", c[0] << 24 | c[1] << 16 | c[2] << 8 | c[3],
 		    "cdb=", c[16] << 24 | c[17] << 16 | c[18] << 8 | c[19]);
 	}
