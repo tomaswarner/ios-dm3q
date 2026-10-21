@@ -205,6 +205,13 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Touch probe results (touch2-4, IMG_5757-5759):** clocks on (GCC vote 0x443C4380, SE4 CBCR 0x4000, RCG XO
+  19.2 MHz), SE4 FW rev 0x102 (SPI), HW param0 0x20102864 (TX FIFO 16 x 32 bit), QUPv3 HW 0x30090000, pins OK
+  (CS high, IRQ idle). Every transfer stalls: status 0x41 (cmd active), no M_IRQ even with M_IRQ_EN
+  0x7FC0007F, TX FIFO level stays 0. **Cause: GENI_IF_DISABLE_RO (0x64) = 1 -> FIFO interface disabled:
+  SE4 only works through GPI DMA (GSI)** (DT dmas = <&gpi_dma1 ...>). Next: minimal GPI driver (Linux
+  drivers/dma/qcom/gpi.c): GPII channel/event rings, CONFIG0 + GO + DMA TREs for SPI, doorbells, poll the
+  event ring; mind Gunyah/TUI ownership (qcom,la-vm) and the gpii mask for HLOS.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
