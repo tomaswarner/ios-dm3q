@@ -325,6 +325,34 @@ static void smmu_sid_check(uint32_t sid)
 		con_hex2("SMMU", "gpi sid unmatched cr0=", rd(smmu), "sid=", sid);
 }
 
+/*
+ * cr0.USFCFG = 1: unmatched streams fault (touch5 rebooted on the first GPI
+ * fetch).  Android maps gpi_dma1 (iommus <&apps_smmu 0xb6 0>) at runtime; the
+ * bootloader does not.  Give the stream a free SMR + S2CR bypass (as UFS has).
+ * Returns 1 when the entry reads back.
+ */
+static int smmu_bypass_sid(uint32_t sid)
+{
+	const uintptr_t smmu = 0x15000000UL;
+	uint32_t nsmr = rd(smmu + 0x20) & 0xff;
+	for (uint32_t n = 0; n < nsmr; n++) {
+		uint32_t smr = rd(smmu + 0x800 + 4 * n);
+		if ((smr >> 31) && !((smr ^ sid) & ~(smr >> 16) & 0x7fff))
+			return ((rd(smmu + 0xc00 + 4 * n) >> 16) & 3) != 2;	/* already matched */
+	}
+	for (uint32_t n = nsmr; n-- > 0; ) {			/* free slots from the top */
+		if (rd(smmu + 0x800 + 4 * n) >> 31)
+			continue;
+		wr(smmu + 0xc00 + 4 * n, 1u << 16);		/* S2CR: TYPE = bypass */
+		wr(smmu + 0x800 + 4 * n, 1u << 31 | sid);	/* SMR: valid, mask 0 */
+		__asm__ volatile("dsb sy" : : : "memory");
+		uint32_t smr = rd(smmu + 0x800 + 4 * n), s2cr = rd(smmu + 0xc00 + 4 * n);
+		con_hex2("SMMU", "new smr=", n << 24 | (smr & 0xffffff) | (smr >> 31) << 23, "s2cr=", s2cr);
+		return smr == (1u << 31 | sid) && ((s2cr >> 16) & 3) == 1;
+	}
+	return 0;
+}
+
 static uint32_t last_fail_status, last_fail_irq, last_fail_fifo, after_tx_status, after_tx_fifo;
 
 /* One full-duplex FIFO transfer of n (<= 64) bytes, CS held low around it. */
@@ -524,7 +552,9 @@ void touch_probe(void)
 	wr(SE + SE_CLK_SEL, 0);
 	wr(SE + SE_MCLK_CFG, (2u << 4) | 1u);
 	smmu_sid_check(0xb6);
-	gpi_init_rc = gpi_init();
+	int smmu_ok = smmu_bypass_sid(0xb6);
+	smmu_sid_check(0xb6);
+	gpi_init_rc = smmu_ok ? gpi_init() : 0xdead;
 	gpi_ok = !gpi_init_rc;
 	con_hex2("GPI", "init=", gpi_init_rc, "ch/ev st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
 	con_hex2("PINS", "irq25=", rd(TLMM + 25 * 0x1000UL + 4) & 1, "cs47=", rd(TLMM + 47 * 0x1000UL + 4));
