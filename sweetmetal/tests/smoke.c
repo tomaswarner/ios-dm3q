@@ -1,5 +1,6 @@
 /* sweetmetal smoke test: runtime_examples' scale_and_offset (output[i] = input[i]*scale + i)
- * through the C API. Usage: smoke runtime_examples.bc */
+ * through the C API. Usage: smoke [KERNEL.bc] (default: the phone's sweettest copy, so the
+ * boot-time runner can start it without arguments) */
 #include "sweetmetal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,13 +16,10 @@ static int fail(const char *what)
 
 int main(int argc, char **argv)
 {
-	if (argc < 2) {
-		fprintf(stderr, "usage: %s KERNEL.bc\n", argv[0]);
-		return 2;
-	}
-	FILE *f = fopen(argv[1], "rb");
+	const char *path = argc > 1 ? argv[1] : "/usr/local/sweettest/runtime_examples.bc";
+	FILE *f = fopen(path, "rb");
 	if (!f) {
-		perror(argv[1]);
+		perror(path);
 		return 2;
 	}
 	static uint8_t bc[1 << 20];

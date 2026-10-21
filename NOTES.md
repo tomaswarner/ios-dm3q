@@ -291,7 +291,16 @@
   `metal_level = MetalLevel::NEWEST` (macOS 26.6 host is unmeasured -> refused; iOS gets NEWEST anyway).
   Host run: `cc -Iinclude tests/smoke.c target/release/libsweetmetal.a -o target/c/smoke`,
   VK_ICD_FILENAMES=<lvp_devenv_icd json> DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib -> 1024/1024, SWEETMETAL OK.
-  NEXT: aarch64-apple-ios build of libsweetmetal.a + smoke as a sweettest test on the phone.
+  iOS build: `IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --release --target aarch64-apple-ios`;
+  `xcrun -sdk iphoneos clang -target arm64-apple-ios16.0 -Iinclude tests/smoke.c
+  target/aarch64-apple-ios/release/libsweetmetal.a -o third_party/sweettest-ios/sm_smoke` (libSystem only;
+  default kernel path /usr/local/sweettest/runtime_examples.bc). Root **test3** = test2 + sm_smoke + .bc
+  (`add-sweettest.sh test2.img test3.img third_party/sweettest-sm`); boot **x20s** = payload-x19s with
+  cmdline `sweettest=sm_smoke sweetnull=backboardd,SpringBoard,sweettest,sm_smoke` (m2v_rt no longer runs
+  at boot). TO FLASH: USERDATA test3.simg + BOOT x20s, cable plugged before boot; expect
+  `|sm_smoke| 1024/1024 correct` / `SWEETMETAL OK` in the USB live log.
+  Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
+  while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner
   (`tools/sweettest/`, `tools/add-sweettest.sh`; launchd run-once job, tests chosen by boot-arg
   `sweettest=a,b`, output via /dev/null + `sweetnull=...` to the USB live log; no network service).
