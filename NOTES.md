@@ -318,6 +318,9 @@
   binaries had been `codesign -s -`'d by hand) and sweet_amfi (0035/0036) makes only *signed* root-fs code
   platform. sm_smoke still ran (spawned by sweettest, not launchd). **Rule: `codesign -f -s - -i NAME`
   every iOS binary;** add-sweettest.sh/add-sweetrun.sh now refuse unsigned Mach-Os. test4 rebuilt signed.
+  **Mac IP is now persistent (no sudo):** `networksetup -setmanual "Sweet iOS (USB Ethernet)" 192.168.7.1
+  255.255.255.0` (done 2026-10-21) - macOS applies it whenever the phone enumerates; the UDP receiver alone
+  (no sudo) is enough: `python3 -u` loop on udp/5140 appending to ~/s23-log.txt.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner
