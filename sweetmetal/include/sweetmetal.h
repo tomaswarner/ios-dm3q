@@ -89,6 +89,13 @@ sm_buffer *sm_buffer_new_no_copy(const sm_device *dev, void *bytes, uint64_t len
  * offset/bytes_per_row of the plane (0 / IOSurfaceGetBytesPerRow without planes). */
 sm_texture *sm_texture_new_iosurface(const sm_buffer *surface, const sm_texture_desc *d, uint64_t offset,
 				     uint64_t bytes_per_row, bool planar);
+/* the facts two-plane formats (YCbCr, RGB10A8_2P_XR10) read; plane1_* from the surface's base */
+typedef struct sm_surface_facts {
+	uint32_t pixel_format;      /* IOSurfaceGetPixelFormat */
+	uint64_t plane, width, height, plane1_offset, plane1_bytes_per_row;
+} sm_surface_facts;
+sm_texture *sm_texture_new_iosurface_facts(const sm_buffer *surface, const sm_texture_desc *d, uint64_t offset,
+					   uint64_t bytes_per_row, bool planar, const sm_surface_facts *facts);
 
 typedef struct sm_sampler_desc {
 	uint32_t min_filter, mag_filter, mip_filter;           /* MTLSamplerMinMagFilter / MipFilter */

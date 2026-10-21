@@ -19,7 +19,7 @@ use metal2vulkan::pipeline::{
 };
 use metal2vulkan_runtime::{
     BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer, ComputeCommandEncoder,
-    DepthStencilState, Device, Function, HostMemory, IoSurfacePlane, LoadAction, Origin,
+    DepthStencilState, Device, Function, HostMemory, IoSurfacePlane, IoSurfaceYCbCr, LoadAction, Origin,
     PipelineOptions, Region,
     RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, SamplerState,
     ScissorRect, Size, StoreAction, Texture, TextureDescriptor, Viewport,
@@ -116,6 +116,36 @@ pub unsafe extern "C" fn sm_texture_new_iosurface(
     }
     let Some(td) = texture_descriptor(&*d) else { return ptr::null_mut() };
     boxed((*buf).new_texture_with_iosurface_plane(&td, IoSurfacePlane::new(offset, bytes_per_row, planar)))
+}
+
+/// The surface facts a two-plane texture over an IOSurface reads (YCbCr formats,
+/// `RGB10A8_2P_XR10`): `IOSurfaceGetPixelFormat`, the plane asked of, the surface's size, plane
+/// 1's offset (from the surface's base) and bytes per row.
+#[repr(C)]
+pub struct SmSurfaceFacts {
+    pub pixel_format: u32,
+    pub plane: u64,
+    pub width: u64,
+    pub height: u64,
+    pub plane1_offset: u64,
+    pub plane1_bytes_per_row: u64,
+}
+
+/// [`sm_texture_new_iosurface`] with the surface's facts (two-plane formats need them).
+#[no_mangle]
+pub unsafe extern "C" fn sm_texture_new_iosurface_facts(
+    buf: *const Buffer, d: *const SmTextureDesc, offset: u64, bytes_per_row: u64, planar: bool,
+    facts: *const SmSurfaceFacts,
+) -> *mut Texture {
+    if buf.is_null() || d.is_null() || facts.is_null() {
+        set_error("null argument");
+        return ptr::null_mut();
+    }
+    let Some(td) = texture_descriptor(&*d) else { return ptr::null_mut() };
+    let f = &*facts;
+    let ycbcr = IoSurfaceYCbCr::new(f.pixel_format, f.plane, [f.width, f.height], f.plane1_offset, f.plane1_bytes_per_row);
+    let plane = IoSurfacePlane::new(offset, bytes_per_row, planar).with_ycbcr(ycbcr);
+    boxed((*buf).new_texture_with_iosurface_plane(&td, plane))
 }
 
 /// `newBufferWithBytesNoCopy:length:options:deallocator:` callback: `(pointer, length, ctx)`.

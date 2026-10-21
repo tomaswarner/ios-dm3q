@@ -267,7 +267,20 @@ static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
 		return nil;
 	}
 	sm_texture_desc td = texture_desc(d);
-	sm_texture *t = sm_texture_new_iosurface(b, &td, offset, bpr, planes > 0);
+	sm_texture *t;
+	if (planes > 1) {
+		sm_surface_facts facts = {
+			IOSurfaceGetPixelFormat(s), plane, IOSurfaceGetWidth(s), IOSurfaceGetHeight(s),
+			(uint64_t)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 1) - base), IOSurfaceGetBytesPerRowOfPlane(s, 1),
+		};
+		t = sm_texture_new_iosurface_facts(b, &td, offset, bpr, YES, &facts);
+	} else {
+		t = sm_texture_new_iosurface(b, &td, offset, bpr, planes > 0);
+	}
+	SMTRACE("iosurface texture %lux%lu fmt %lu surface '%.4s' planes %zu plane %lu -> %p", (unsigned long)d.width,
+		(unsigned long)d.height, (unsigned long)d.pixelFormat, (char[]){ (char)(IOSurfaceGetPixelFormat(s) >> 24),
+		(char)(IOSurfaceGetPixelFormat(s) >> 16), (char)(IOSurfaceGetPixelFormat(s) >> 8), (char)IOSurfaceGetPixelFormat(s) },
+		planes, (unsigned long)plane, t);
 	if (!t) {
 		sm_error(@"newTextureWithDescriptor:iosurface:");
 		sm_buffer_release(b);

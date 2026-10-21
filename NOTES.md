@@ -441,6 +441,25 @@
   cmdline minus sweettest, sweetnull=backboardd,SpringBoard, + sweetmetal=1. Bundle installed on the phone's
   root. Expect: backboardd/SpringBoard use Metal (CA::OGL::MetalContext) on lavapipe; first frames slow
   (JIT); `SWEETMETAL missing:` lines in the USB live log (sweetnull). Fallback: flash x20s.
+  **🎉 Boot x21s FLASHED (2026-10-21 ~20:40): backboardd + SpringBoard run on SweetMetal system-wide.**
+  Fixes on the running system (bundle reinstalled via sweetrun; KeepAlive daemons respawn with it):
+  backboardd aborted in CA::OGL::MetalContext::warmup_shaders -> get_tile_pipeline ("Metal failed to build
+  render pipeline"): CA enables tile shaders from supportsTileShaders only, which _MTLDevice answered YES
+  (A11) -> device now answers supportsTileShaders/MemorylessRenderTargets/RasterOrderGroups/SIMDGroup/
+  NativeHardwareFP16/YCBCR*/ExtendedXR10 NO and explicit limits (CA new_metal_context reads them).
+  SpringBoard aborted in MPS (MPSLibrary.mm:550 "unable to load function D2F6H"): MPS creates kernels with
+  newComputePipelineStateWithDescriptor:options:reflection:error: (+ MTLLinkedFunctions) which fell to
+  Apple's compiler path (nil, no error) -> implemented (computeFunction), + full compute encoder
+  (setTexture/samplers/threadgroup memory/barriers: MPSComputeEncoder borrows our IMPs), userDictionary,
+  globalTraceObjectID. `objc/mps_probe.m`: MPSImageGaussianBlur on SweetMetal works (smooth edge ramp).
+  Function constants (newFunctionWithName:constantValues:, async, MTLFunctionDescriptor) work as is:
+  Apple specializes the AIR in-process; bitcodeData is the specialized module.
+  After that SpringBoard stopped crashing; **backboardd presents frames** (`SWEET FB: swap 73 ... 1125x2436
+  fmt 'b3a8'` = RGB10A8_2P_XR10 two-plane surfaces) while newTextureWithDescriptor:iosurface: still fails for
+  XR10 (runtime needs plane 1 facts) -> `sm_texture_new_iosurface_facts` (OSType, plane, size, plane 1
+  offset/bpr) written + built, NOT installed: sweetrun timed out, then the live log stopped and en9 went
+  inactive (phone hung? USB starved by full-CPU lavapipe rendering?). Open: AppleCLCD present of 'b3a8'
+  surfaces (our framebuffer path expects BGRA).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
