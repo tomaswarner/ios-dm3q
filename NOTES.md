@@ -205,6 +205,18 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Milestone A step 1 (offline, untested on the phone): CoreImage "no GL".** CIContext initWithOptions:
+  no Metal (can_use_metal) -> CIGLIsUsable (= _wrapGLIsUsable, always 1) -> GL fallback unless the caller
+  passes an option; CI::GLContext's constructor calls init even when CIEAGLContextCreate fails and init's
+  "macro context invalid" path only logs, so disabling OpenGLES (EAGL nil) would still crash. Fix: patch
+  _wrapGLIsUsable to return 0 (cache .07 off 0x1f1ee0, `20 00 80 52` -> `00 00 80 52`): initWithOptions
+  and internalContextWithEAGLContext return nil. `tools/patch-ios-root-nogl.sh IN OUT` (APFS clone, byte
+  check) -> `apple/ios16-root-20H392-nogl.img/.simg`. Boot image `shim/out/dm3q-x15s-boot.img` = kernel
+  out-dm3q-008 (0105 keys + 0106 opaque black) + `cs_enforcement_disable=1`. TODO on the phone: flash
+  USERDATA nogl.simg + BOOT x15s, enable Bold Text, check SpringBoard survives (icons may lose styling).
+  Metal RE: driver classes subclass IOGPUMetal* (IOGPU.framework); shader backend = plugin dlopened by
+  MTLCompiler with C ABI MTLCompilerCreate/Delete/BuildRequest(WithOptions|WithSerializedBitcode)/ReleaseReply
+  (A11: AGXCompilerCore.framework); MTLCompilerService XPC exists.
 - **GPU research (2026-10-21, subagent, notes in /private/tmp/claude-501/gpu-research/):** Metal device =
   `_MTLRegisterDevices` matches IOKit `IOAcceleratorES`, reads `MetalPluginName`/`MetalPluginClassName`, loads
   `/System/Library/Extensions/<name>.bundle`, class must subclass `_MTLDevice`, `initWithAcceleratorPort:`
