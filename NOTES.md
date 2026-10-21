@@ -407,6 +407,13 @@
   **First full Metal program on the S23 (19:20):** newLibraryWithURL (real Apple-compiled metallib) ->
   newFunctionWithName -> newComputePipelineStateWithFunction -> queue/command buffer/encoder ->
   dispatchThreadgroups -> commit/waitUntilCompleted: scale_and_offset 1024/1024, status Completed, handler ran.
+  **Bundle slice 2 (`objc/SweetMetalRender.m`, 19:40):** textures (own + newTextureWithDescriptor:iosurface:plane:
+  = surface pages as a no-copy buffer, CFRetain'd until the import goes), samplers, depth/stencil states,
+  render pipelines from MTLRenderPipelineDescriptor (colors, blend, depth/stencil formats, vertex descriptor),
+  render encoder (buffers/bytes/textures/samplers per stage, *BufferOffset, viewport, scissor, depth/stencil,
+  cull, winding, bias, fill, blend color, draw/drawIndexed), blit encoder, newBufferWithBytesNoCopy. **Phone:**
+  render into a real IOSurface (IOSurfaceCreate 'RGBA', 64 B rows) 64/64; vertex descriptor + D32S8 depth/
+  stencil + cull 64/64; texture sampling + blit readback 64/64; MTL_PROBE OK.
   NEXT: the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)

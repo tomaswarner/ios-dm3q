@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 OUT=${OUT:-../../third_party/sweettest-ios}
 IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --release --target aarch64-apple-ios
 CC="xcrun -sdk iphoneos clang -target arm64-apple-ios16.0 -fobjc-arc -Iinclude"
-$CC -Wno-objc-protocol-property-synthesis -Wno-protocol -dynamiclib \
+$CC -Wno-objc-protocol-property-synthesis -Wno-protocol -Wno-objc-protocol-method-implementation -dynamiclib \
 	-install_name /usr/local/sweettest/SweetMetal.dylib objc/SweetMetal.m objc/SweetMetalRender.m \
 	target/aarch64-apple-ios/release/libsweetmetal.a -framework Foundation -framework Metal \
 	-framework IOSurface -o "$OUT/SweetMetal.dylib"
