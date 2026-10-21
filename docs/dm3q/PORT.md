@@ -108,3 +108,28 @@ Si el shim necesita datos propios (payload/ADT), meterlos al final del `Image` e
 3. `shim/build.sh` → header v4; primer shim **de diagnóstico**: sin XNU, pinta la pantalla,
    imprime los bancos de `memory` del DTB, el EL actual y prueba GIC/timers (como `tools/build-v60-diag.py`).
 4. Recién con eso: desbloqueo + flash del shim de diagnóstico.
+
+## Resultado del diag v1 en el teléfono (2026-10-20, foto IMG_5707)
+Arrancó a la primera: Samsung ABL acepta el boot v4 con nuestro `Image` (vbmeta flags 3).
+- Pantalla: framebuffer **0xb8000000 vivo a 1440×3088**, stride 1440×4, orden **RGB correcto** (barras R/G/B).
+- **EL1**, MMU apagada. CPU de arranque = **Cortex-A510 r1p1** (MIDR 0x411FD461), MPIDR 0x81000000 (bit MT=1, núcleos en Aff1).
+- ID_AA64ISAR1 0x0010111101211052: **PAC presente** (APA=5, GPA=1), BF16, I8MM, SB.
+- ID_AA64MMFR0 0x0000022200101122: PARange 40 bits, **granule 16K soportado**.
+- CNTFRQ 19.2 MHz.
+- DTB del ABL en 0xB6DEA000 (0x13D811 bytes). `/memory` (8 bancos, 7935 MiB):
+```
+0x080000000-0x080e00000    14 MiB
+0x0811d0000-0x0d8000000  1390 MiB
+0x0d8140000-0x0d8160000   0.1 MiB
+0x0e29f0000-0x0fa200000   376 MiB
+0x0facc0000-0x100000000    83 MiB
+0x880000000-0x8b9a00000   922 MiB
+0x8b9c00000-0x8bba00000    30 MiB
+0x8c0000000-0xa00000000  5120 MiB   ← XNU highmem: base 0x8c0000000
+```
+- PSCI 1.1, SMCCC 1.3. `hvc` 0x8600FF01 (UID vendor hyp) → -1: hay hipervisor en EL2 (HVC no se cae),
+  pero Gunyah no implementa ese UID estándar.
+- GICD: TYPER 0x016B001F (1024 INTIDs, LPIs), IIDR 0x47000070 (no es el GIC-600 de ARM → **vGIC emulado por
+  Gunyah**), CTLR 0xD0 (**DS=1: un solo estado de seguridad**, ARE), PIDR2 → GICv3.
+- GICR: 8 frames con stride 0x40000, afinidades 0x000…0x700 = MPIDR del DT, último frame marca Last.
+- UPTIME llegó al menos a 45 s sin reinicio (ver handoff para el resultado final del watchdog).

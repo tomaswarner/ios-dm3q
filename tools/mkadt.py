@@ -12,10 +12,10 @@ import adt  # noqa: E402
 # Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
 PHYS_BASE = 0xb0000000
 MEM_SIZE = 0x4d000000
-# --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
-# <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
-# carve-out is in the low bank and the dynamic pools are limited below 4G.
-HIGH_PHYS_BASE = 0x100000000
+# --highmem (phone only). DM3Q 8 GB: ABL's /memory (dm3q diag v1, 2026-10-20) has 8 banks,
+# 7935 MiB; the largest is 0x8_c0000000-0xa_00000000 (5 GiB, no fixed carve-out inside).
+# Same 0xfcc00000 size as the proven sweet config, at the start of that bank.
+HIGH_PHYS_BASE = 0x8c0000000
 HIGH_MEM_SIZE = 0xfcc00000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
