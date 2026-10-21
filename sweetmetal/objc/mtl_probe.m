@@ -348,11 +348,19 @@ int main(int argc, char **argv)
 		const char *dylib = argc > 1 ? argv[1] : "/usr/local/sweettest/SweetMetal.dylib";
 		const char *syslib = argc > 2 ? argv[2] : "/System/Library/Frameworks/QuartzCore.framework/default.metallib";
 		const char *testlib = argc > 3 ? argv[3] : "/usr/local/sweettest/sweetmetal_test.metallib";
-		if (!dlopen(dylib, RTLD_NOW)) {
+		Class cls = nil;
+		if (strstr(dylib, ".bundle")) {
+			/* as Metal's getMetalPluginClassForService: bundle, classNamed:, _MTLDevice subclass */
+			NSBundle *b = [NSBundle bundleWithPath:@(dylib)];
+			cls = [b classNamed:@"SweetMTLDevice"];
+			printf("bundle %s: %s, principalClass %s, subclass of _MTLDevice %d\n", dylib, b ? "found" : "MISSING",
+			       NSStringFromClass(b.principalClass).UTF8String, [cls isSubclassOfClass:NSClassFromString(@"_MTLDevice")]);
+		} else if (!dlopen(dylib, RTLD_NOW)) {
 			printf("FAIL dlopen: %s\n", dlerror());
 			return 1;
+		} else {
+			cls = NSClassFromString(@"SweetMTLDevice");
 		}
-		Class cls = NSClassFromString(@"SweetMTLDevice");
 		id<MTLDevice> dev = [(id)[cls alloc] initWithAcceleratorPort:0];
 		check(dev != nil, "SweetMTLDevice initWithAcceleratorPort:0", nil);
 		if (!dev)
@@ -369,6 +377,10 @@ int main(int argc, char **argv)
 			render_sampled(dev, lib, q);
 		} else
 			printf("skip  %s (no test metallib)\n", testlib);
+		/* an unimplemented selector: logged and answered nil (not SWEETMETAL_STRICT) */
+		id<MTLBuffer> b = [dev newBufferWithLength:4096 options:0];
+		id<MTLTexture> none = [b newTextureWithDescriptor:[MTLTextureDescriptor new] offset:0 bytesPerRow:64];
+		check(none == nil, "missing selector answered nil", nil);
 		printf(failures ? "MTL_PROBE FAIL (%d)\n" : "MTL_PROBE OK\n", failures);
 		return failures != 0;
 	}

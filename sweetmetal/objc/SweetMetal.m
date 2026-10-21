@@ -13,6 +13,30 @@
  * (SWEETMETAL missing: ...) before the usual exception, to drive what comes next. */
 #import "SweetMetalPrivate.h"
 
+BOOL sm_strict(void)
+{
+	static int strict = -1;
+	if (strict < 0) {
+		const char *v = getenv("SWEETMETAL_STRICT");
+		strict = v && *v == '1';
+	}
+	return strict;
+}
+
+void sm_log_missing(id obj, SEL sel)
+{
+	static NSMutableSet *seen;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{ seen = [NSMutableSet set]; });
+	NSString *key = [NSString stringWithFormat:@"-[%s %s]", object_getClassName(obj), sel_getName(sel)];
+	@synchronized(seen) {
+		if ([seen containsObject:key])
+			return;
+		[seen addObject:key];
+	}
+	SMLOG("missing: %s (%s)", key.UTF8String, getprogname());
+}
+
 NSError *sm_error(NSString *what)
 {
 	NSString *msg = [NSString stringWithFormat:@"%@: %s", what, sm_last_error()];

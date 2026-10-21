@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "sweetmetal.h"
 
 @interface _MTLDevice : NSObject
@@ -16,10 +17,31 @@
 
 #define SMLOG(...) do { fprintf(stderr, "SWEETMETAL " __VA_ARGS__); fputc('\n', stderr); } while (0)
 
+/* A selector a client sends that the class does not implement (methodSignatureForSelector: finds
+ * it in an adopted protocol, or makes one up): logged once (class and selector) and, while the driver is being filled in, answered with 0/nil instead of an exception, so one
+ * run collects every gap. SWEETMETAL_STRICT=1 restores Metal's exception. A method of a private
+ * superclass that is abstract (doesNotRecognizeSelector from inside _MTLDevice) still throws. */
+void sm_log_missing(id obj, SEL sel);
+BOOL sm_strict(void);
+
 #define MISSING_LOGGER \
+	-(NSMethodSignature *)methodSignatureForSelector:(SEL)sel \
+	{ \
+		NSMethodSignature *sig = [super methodSignatureForSelector:sel]; \
+		return sig || sm_strict() ? sig : [NSMethodSignature signatureWithObjCTypes:"@@:"]; \
+	} \
+	-(void)forwardInvocation:(NSInvocation *)inv \
+	{ \
+		uint8_t zero[64] = { 0 }; \
+		if (sm_strict()) \
+			[self doesNotRecognizeSelector:inv.selector]; \
+		sm_log_missing(self, inv.selector); \
+		if (inv.methodSignature.methodReturnLength <= sizeof zero) \
+			[inv setReturnValue:zero]; \
+	} \
 	-(void)doesNotRecognizeSelector:(SEL)sel \
 	{ \
-		SMLOG("missing: -[%s %s]", object_getClassName(self), sel_getName(sel)); \
+		sm_log_missing(self, sel); \
 		[super doesNotRecognizeSelector:sel]; \
 	}
 
