@@ -328,29 +328,41 @@ static void smmu_sid_check(uint32_t sid)
 /*
  * cr0.USFCFG = 1: unmatched streams fault (touch5 rebooted on the first GPI
  * fetch).  Android maps gpi_dma1 (iommus <&apps_smmu 0xb6 0>) at runtime; the
- * bootloader does not.  Give the stream a free SMR + S2CR bypass (as UFS has).
- * Returns 1 when the entry reads back.
+ * bootloader does not.  Gunyah's virtual SMMU turns an S2CR bypass into fault
+ * (touch6), so copy the UFS stream's S2CR instead: translate through its
+ * context bank, which has SCTLR.M = 0 (stage 1 off, Gunyah's stage 2 only).
+ * Returns 1 when the entry reads back as non-fault.
  */
-static int smmu_bypass_sid(uint32_t sid)
+static int smmu_route_sid_like(uint32_t sid, uint32_t like)
 {
 	const uintptr_t smmu = 0x15000000UL;
-	uint32_t nsmr = rd(smmu + 0x20) & 0xff;
+	uint32_t nsmr = rd(smmu + 0x20) & 0xff, slot = ~0u, ref = ~0u;
 	for (uint32_t n = 0; n < nsmr; n++) {
 		uint32_t smr = rd(smmu + 0x800 + 4 * n);
-		if ((smr >> 31) && !((smr ^ sid) & ~(smr >> 16) & 0x7fff))
-			return ((rd(smmu + 0xc00 + 4 * n) >> 16) & 3) != 2;	/* already matched */
-	}
-	for (uint32_t n = nsmr; n-- > 0; ) {			/* free slots from the top */
-		if (rd(smmu + 0x800 + 4 * n) >> 31)
+		if (!(smr >> 31))
 			continue;
-		wr(smmu + 0xc00 + 4 * n, 1u << 16);		/* S2CR: TYPE = bypass */
-		wr(smmu + 0x800 + 4 * n, 1u << 31 | sid);	/* SMR: valid, mask 0 */
-		__asm__ volatile("dsb sy" : : : "memory");
-		uint32_t smr = rd(smmu + 0x800 + 4 * n), s2cr = rd(smmu + 0xc00 + 4 * n);
-		con_hex2("SMMU", "new smr=", n << 24 | (smr & 0xffffff) | (smr >> 31) << 23, "s2cr=", s2cr);
-		return smr == (1u << 31 | sid) && ((s2cr >> 16) & 3) == 1;
+		if (!((smr ^ sid) & ~(smr >> 16) & 0x7fff) && slot == ~0u)
+			slot = n;
+		if (!((smr ^ like) & ~(smr >> 16) & 0x7fff) && ref == ~0u)
+			ref = n;
 	}
-	return 0;
+	if (ref == ~0u)
+		return 0;
+	uint32_t s2cr_ref = rd(smmu + 0xc00 + 4 * ref);
+	if (slot == ~0u)
+		for (uint32_t n = nsmr; n-- > 0; )		/* free slots from the top */
+			if (!(rd(smmu + 0x800 + 4 * n) >> 31)) {
+				slot = n;
+				break;
+			}
+	if (slot == ~0u)
+		return 0;
+	wr(smmu + 0xc00 + 4 * slot, s2cr_ref);
+	wr(smmu + 0x800 + 4 * slot, 1u << 31 | sid);	/* SMR: valid, mask 0 */
+	__asm__ volatile("dsb sy" : : : "memory");
+	uint32_t s2cr = rd(smmu + 0xc00 + 4 * slot);
+	con_hex2("SMMU", "ref s2cr=", ref << 24 | (s2cr_ref & 0xffffff), "new s2cr=", slot << 24 | (s2cr & 0xffffff));
+	return ((s2cr >> 16) & 3) != 2;
 }
 
 static uint32_t last_fail_status, last_fail_irq, last_fail_fifo, after_tx_status, after_tx_fifo;
@@ -552,7 +564,7 @@ void touch_probe(void)
 	wr(SE + SE_CLK_SEL, 0);
 	wr(SE + SE_MCLK_CFG, (2u << 4) | 1u);
 	smmu_sid_check(0xb6);
-	int smmu_ok = smmu_bypass_sid(0xb6);
+	int smmu_ok = smmu_route_sid_like(0xb6, 0x60);	/* like UFS */
 	smmu_sid_check(0xb6);
 	gpi_init_rc = smmu_ok ? gpi_init() : 0xdead;
 	gpi_ok = !gpi_init_rc;
