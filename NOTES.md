@@ -152,6 +152,12 @@
   unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1
   sweettouch=0 sweetkeys=0 sweetusb=0` (read-only root: no ufsrw/rootrw yet). userdata flashed with
   `samloader flash -p USERDATA ../apple/ios16-root-20H392.img` (raw 16 GiB HFSX volume; erases Android data).
+- **🎉 Boot x5 (IMG_5745, 2026-10-20 ~23:55): iOS USERLAND RUNS ON DM3Q.** userdata flashed as an Android sparse
+  image (`tools/img2simg.py`; the raw 16 GiB image was rejected by Download Mode with LOKE status 3 and left the
+  "error occurred while updating" screen, still flashable). Root mounted, dyld shared cache mapped
+  ("not in trust cache" warnings), `Darwin Bootstrapper Version 7.0.0`, launchd ondemand, boot tasks: fsck
+  skipped, mount-phase-1: `mount_hfs: Read-only file system`, `mount: / failed with 1`, BindFS preboot firmware
+  lookup error 2, `panic: mount[3] exited` (as sweet before rootrw). x6 = same + `ufsrw=1 rootrw=1`.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
