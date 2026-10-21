@@ -319,9 +319,17 @@ static inline uint32_t mmio_rd(uintptr_t a)
 static uint32_t uic(uint32_t cmd, uint32_t arg1, uint32_t arg3, uint32_t *val)
 {
 	uint64_t start = ticks();
-	while (!(ufs_rd(REG_HCS) & HCS_UCRDY))
+	while (!(ufs_rd(REG_HCS) & HCS_UCRDY)) {
+		/* dm3q ufs7: a pending UE (PA LINE-RESET indication after the device
+		 * reset) kept UCRDY low; acknowledge it as ufshcd does */
+		uint32_t is = ufs_rd(REG_IS);
+		if (is & (1u << 2)) {
+			(void)ufs_rd(REG_UECPA);
+			ufs_wr(REG_IS, 1u << 2);
+		}
 		if (ticks() - start > 19200000)
 			return 0xfe;
+	}
 	ufs_wr(REG_IS, IS_UCCS | IS_UHXS);
 	ufs_wr(REG_UCMDARG1, arg1);
 	ufs_wr(REG_UCMDARG2, 0);
@@ -817,10 +825,19 @@ void test_ufs_linux(void)
 	con_hex2("CLKCTL", "cc=", cc, "err=", e1 | e2 << 4 | e3 << 8 | e4 << 12 | e5 << 16);
 
 	stage_str("ufs linkstartup");
+	con_hex2("PRELINK", "hcs=", ufs_rd(REG_HCS), "is=", ufs_rd(REG_IS));
+	con_hex2("PRELINK", "uecpa=", ufs_rd(REG_UECPA), "uecdl=", ufs_rd(REG_UECDL));
+	ufs_wr(REG_IS, 0xffffffffu);			/* ack everything pending */
 	uint32_t rc = 0xff;
-	for (int i = 0; i < 4 && rc; i++)
+	for (int i = 0; i < 5 && rc; i++) {
 		rc = uic(0x16, 0, 0, 0);
-	con_hex2("LINKUP", "rc=", rc, "hcs=", ufs_rd(REG_HCS));
+		con_hex2("LINKUP", "rc/try=", rc << 8 | i, "hcs/is=", ufs_rd(REG_HCS) << 16 | (ufs_rd(REG_IS) & 0xffff));
+		if (rc) {
+			(void)ufs_rd(REG_UECPA);
+			ufs_wr(REG_IS, 0xffffffffu);
+			udelay(10000);
+		}
+	}
 	con_hex2("LINKUP", "is=", ufs_rd(REG_IS), "uecpa=", ufs_rd(REG_UECPA));
 	if (rc || !(ufs_rd(REG_HCS) & HCS_DP)) {
 		con_str("UFS", "link startup failed / no device");

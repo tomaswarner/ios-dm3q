@@ -117,6 +117,10 @@
   Probe `shim/out/dm3q-ufs7-boot.img` (test_ufs_linux, U-Boot order): votes, RST_n pulse (0xF1DE004),
   HCE 0, GCC_UFS_PHY_BCR 0x177000 pulse, **QMP PHY sm8550 tables** (`shim/ufsphy.c`), QUNIPRO_SEL, HCE 1,
   TX FSM == H8, DME_VS_CORE_CLK_CTRL 1 us = 300, 40 ns = 12, LCC off, link startup, NOP/SSU/fDeviceInit/GPT.
+- **ufs7 result (IMG_5734): PHY comes up.** RST_n pulse at 0xF1DE004 OK (no reset), votes OK, **PHY rc 0 (PCS
+  ready)**, HW ver 0x50000000, HCE 1, TX FSM = HIBERN8 (1), DME_VS_CORE_CLK_CTRL 0x012C0000 + 40ns + LCC off all
+  rc 0. Link startup: rc 0xFE (UCRDY low, HCS 0), IS 0x4 UE, UECPA 0x80000010 (PA LINE-RESET indication: the
+  freshly reset device). ufs8: uic() acks UE while waiting for UCRDY, IS cleared before, 5 link startup tries.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
