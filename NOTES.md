@@ -65,6 +65,10 @@
   0x400 (format only, no fault). => not an SMMU S1 block, not Hibern8. Next suspicion: ABL gated the UFS AXI
   (DMA) / ICE clocks at exit. Probe `shim/out/dm3q-ufs2-boot.img`: GCC CBCRs (axi 0x77018, ice 0x77074,
   unipro 0x77068, ahb 0x77024, aux 0x770b0, rx/tx symbols) + GDSCs 0x77004/0x9e000, enable the off ones, retry.
+- **ufs2 result (IMG_5725):** GCC UFS branches all running (axi/unipro/aux/rx/tx CBCR 0 = CLK_OFF clear,
+  ice 0x4000, ahb 0x80000002 = HW_CTL idle-gated), GDSCs F822F800/F8222800 (PWR_ON). Not clocks.
+  Probe `shim/out/dm3q-ufs3-boot.img`: AHIT/CFG1/CFG2/AH8 regs, DME_PEER_GET (is the device end alive?),
+  dump of ABL's last UTRDs + UPIU/CDB (how ABL drove the host and its last command).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

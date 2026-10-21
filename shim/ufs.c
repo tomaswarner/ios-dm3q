@@ -424,6 +424,33 @@ static void ufs_clocks_on(void)
 	}
 }
 
+/* DME_PEER_GET: asks the UFS device end of the link (fails if it is asleep/off) */
+static void dme_peer_get(const char *label, uint32_t attr)
+{
+	uint32_t v = 0, rc = uic(0x03, attr << 16, 0, &v);
+	con_hex2(label, "rc=", rc, "val=", v);
+}
+
+/* What ABL last did: its transfer list is still in RAM. Show the used slots. */
+static void abl_list_dump(uintptr_t list)
+{
+	int shown = 0;
+	for (int i = 0; i < 32 && shown < 4; i++) {
+		volatile uint32_t *d = (volatile uint32_t *)(list + 32 * i);
+		uint32_t ucdba = d[4];
+		if (!ucdba && !d[5])
+			continue;
+		shown++;
+		con_hex2("ABL UTRD", "dw0=", d[0], "ocs=", d[2]);
+		con_hex2("", "ucd=", ucdba, "resp/prdt=", (d[6] >> 16) << 16 | (d[7] & 0xffff));
+		volatile uint8_t *c = (volatile uint8_t *)(((uintptr_t)d[5] << 32) | ucdba);
+		con_hex2("", "upiu=", c[0] << 24 | c[1] << 16 | c[2] << 8 | c[3],
+		    "cdb=", c[16] << 24 | c[17] << 16 | c[18] << 8 | c[19]);
+	}
+	if (!shown)
+		con_str("ABL UTRD", "list empty");
+}
+
 void test_ufs_dm3q(void)
 {
 	con_str("UFS", "dm3q probe (read-only data)");
@@ -437,22 +464,21 @@ void test_ufs_dm3q(void)
 		con_str("UFS", "host off or requests outstanding: stop");
 		return;
 	}
-	dme_get("PWRMODE", 0x1571);	/* PA_PWRMode: 0x11 fast, 0x22 slow, 0x44/0x55 auto */
-	dme_get("TXGEAR", 0x1568);	/* PA_TxGear */
-	dme_get("RXGEAR", 0x1583);	/* PA_RxGear */
-	dme_get("TXLANES", 0x1561);	/* PA_ConnectedTxDataLanes */
-
-	stage_str("gcc read");
-	int n_off = ufs_clocks("CLK");
+	/* dm3q ufs1/ufs2: local link HS-G5 x2 FAST, UEC clean, GCC UFS clocks on, SMMU bypass */
+	con_hex2("UFS", "ahit=", ufs_rd(0x18), "cfg1=", ufs_rd(0xdc));
+	con_hex2("UFS", "cfg2=", ufs_rd(0xe0), "ah8cfg=", ufs_rd(0xfc));
+	dme_get("PWRMODE", 0x1571);		/* local PA_PWRMode */
+	stage_str("dme peer");
+	dme_peer_get("PEER PWR", 0x1571);	/* device-side PA_PWRMode */
+	dme_peer_get("PEER GEAR", 0x1583);	/* device-side PA_RxGear */
+	dme_peer_get("PEER MID", 0x5002);	/* device-side DME_DDBL1_ManufacturerID */
+	stage_str("abl list");
+	if (abl)
+		abl_list_dump(abl);
+	(void)ufs_clocks;
+	(void)ufs_clocks_on;
 	stage_str("ufs own");
 	try_cmds("OWN", (uintptr_t)utrl_own, (uintptr_t)&ucd_own);
-	if (n_off) {
-		stage_str("gcc enable");
-		ufs_clocks_on();
-		ufs_clocks("CLK2");
-		stage_str("ufs clk");
-		try_cmds("CLKON", (uintptr_t)utrl_own, (uintptr_t)&ucd_own);
-	}
 	/* DME_HIBERNATE_EXIT: harmless if the link is not in Hibern8 (error result) */
 	uint32_t h8 = uic(0x18, 0, 0, 0);
 	con_hex2("H8EXIT", "rc=", h8, "hcs=", ufs_rd(REG_HCS));
