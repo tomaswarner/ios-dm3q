@@ -15,6 +15,17 @@
   Diagnostic shim `shim/diag.c` + `shim/build-diag.sh` (no XNU; screen calibration, EL/CPU ids,
   /memory banks from ABL's DTB, PSCI/SMCCC, hypervisor UID, GIC ids, uptime until reset).
   Host render: `cc -DDIAG_HOST -o out/diag_host diag_host.c diag.c console.c` (checked against the real DTB).
+- **XNU builds in CI**: repo github.com/tomaswarner/ios-dm3q (public), run 39522891837 = patches 0010/0012
+  retargeted to FB 0xb8000000 1440x3088 (verified in the binary: movk #0xb800, stride #5760, no 0x9c00).
+  Artifact in `xnu/out-dm3q-002/`. First XNU image `shim/out/dm3q-x1-boot.img`: `mkadt.py --highmem`,
+  cmdline `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 sweettouch=0
+  sweetkeys=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin` (no ufsrw: UFS read-only, no log ring writes;
+  sweetusb=0 because 0072 pokes sweet clock registers). Expect kernel text, then no root (userdata is
+  still Android). Patches still sweet-specific: 0046 (FB geometry/dpi), 0058/0061 (1080x2400 touch/display
+  layout), 0060/0062 (SPMI keys, GENI I2C touch, RPMh), 0072-0077 (USB).
+- iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
+  (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
+  userdata for iOS; flash only after UFS is shown to work.
 - **Diag v1 booted on the phone (2026-10-20)** after OEM unlock: results in `docs/dm3q/PORT.md` (FB live
   1440x3088 RGB, EL1, Gunyah vGIC DS=1, 8 DRAM banks; no watchdog reset after minutes). Flashed with
   `tools/samloader-rs/samloader flash -p VBMETA vbmeta.img -p BOOT boot.img` (PIT: BOOT, VBMETA).
