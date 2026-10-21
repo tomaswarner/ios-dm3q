@@ -203,9 +203,11 @@ void touch_probe(void)
 
 	/* 1. clocks before touching the SE */
 	wr(GCC_VOTE, rd(GCC_VOTE) | (0xfu << 18) | (1u << 26));
-	int ok = wait_clear(GCC + 0x184e4, 1u << 31, 20000) && wait_clear(GCC + 0x23280, 1u << 31, 20000);
+	/* only the SE clock is checked: the wrapper AHB branches are voted + HW-gated (BRANCH_HALT_VOTED),
+	 * their halt bit does not show them on (dm3q touch1: s_ahb read as off while working) */
+	int ok = wait_clear(GCC + 0x184e4, 1u << 31, 20000);
 	con_hex2("TCLK", "vote=", rd(GCC_VOTE), "rcgcfg=", rd(GCC_S4_RCG + 4));
-	con_hex2("TCLK", "s4cbcr=", rd(GCC + 0x184e4), "ok=", ok);
+	con_hex2("TCLK", "s4cbcr=", rd(GCC + 0x184e4), "sahb=", rd(GCC + 0x23280));
 	if (!ok)
 		return;
 
