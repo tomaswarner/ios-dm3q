@@ -344,7 +344,16 @@
   - nothing written yet; (b) RE of iOS 16 Metal device registration (Metal `_getMetalPluginClassForService`
   0x181a3c7c8, `__MTLCreateSystemDefaultDevice_block_invoke` 0x181a37050; ipsw dyld disass on
   apple/dsc/20H392__iPhone10,3_6) - subagent stopped before reporting.
-  NEXT: vertex descriptors, depth/stencil states + attachments, IOSurface-backed textures, then the
+  **slice 3 done (2026-10-21 ~19:00):** vertex descriptors (`sm_vertex_descriptor`, 31 attributes/layouts,
+  format 0 / stride 0 = unset, stride UINT32_MAX = dynamic; NULL pointer = nil), depth/stencil states
+  (`sm_depth_stencil_new`), pass depth/stencil attachments, encoder setDepthStencilState/stencil refs/cull/
+  winding/depth bias/clip mode/fill mode/blend color. Test shaders `sweetmetal/tests/slice3.ll` (hand-written
+  AIR: no Metal toolchain installed; `llvm-as` -> slice3.bc): attr_vertex [[stage_in]] float3 + float4.
+  smoke `depth` case (interleaved float3 + uchar4norm, D32S8, Less + stencil Replace/Equal, CCW + cull back)
+  passes on host lavapipe: 64/64. iOS sm_smoke built+signed in third_party/sweettest-ios with slice3.bc;
+  NOT yet run on the phone (not connected): `tools/sweetrun.py -f third_party/sweettest-ios/sm_smoke -f
+  third_party/sweettest-ios/slice3.bc -f sweetmetal/tests/runtime_examples.bc sm_smoke`.
+  NEXT: IOSurface-backed textures, then the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).

@@ -93,11 +93,28 @@ typedef struct sm_color_attachment {
 	uint32_t write_mask;    /* MTLColorWriteMask */
 } sm_color_attachment;
 
+typedef struct sm_vertex_attribute {
+	uint32_t format;        /* MTLVertexFormat; 0 = unset */
+	uint32_t offset, buffer_index;
+} sm_vertex_attribute;
+
+typedef struct sm_vertex_layout {
+	uint32_t stride;        /* 0 = unset, UINT32_MAX = MTLBufferLayoutStrideDynamic */
+	uint32_t step_function; /* MTLVertexStepFunction (PerVertex = 1) */
+	uint32_t step_rate;
+} sm_vertex_layout;
+
+typedef struct sm_vertex_descriptor {
+	sm_vertex_attribute attributes[31];
+	sm_vertex_layout layouts[31];
+} sm_vertex_descriptor;
+
 typedef struct sm_render_pipeline_desc {
 	const sm_function *vertex;
 	const sm_function *fragment;   /* may be NULL */
 	sm_color_attachment color[8];
 	uint32_t depth_format, stencil_format, raster_sample_count;  /* 0 = none / default */
+	const sm_vertex_descriptor *vertex_descriptor;               /* NULL = nil */
 } sm_render_pipeline_desc;
 
 sm_render_pipeline *sm_render_pipeline_new(const sm_device *dev, const sm_render_pipeline_desc *d);
@@ -110,9 +127,35 @@ typedef struct sm_pass_color {
 	double clear_color[4];
 } sm_pass_color;
 
+typedef struct sm_pass_depth_stencil {
+	const sm_texture *texture;     /* NULL = unused */
+	uint64_t level, slice;
+	uint32_t load_action, store_action;
+	double clear_depth;            /* depth attachment only */
+	uint32_t clear_stencil;        /* stencil attachment only */
+} sm_pass_depth_stencil;
+
 typedef struct sm_render_pass_desc {
 	sm_pass_color color[8];
+	sm_pass_depth_stencil depth, stencil;
 } sm_render_pass_desc;
+
+typedef struct sm_depth_stencil sm_depth_stencil;
+
+typedef struct sm_stencil_desc {
+	uint32_t compare_function;     /* MTLCompareFunction */
+	uint32_t stencil_failure_operation, depth_failure_operation, depth_stencil_pass_operation; /* MTLStencilOperation */
+	uint32_t read_mask, write_mask;
+} sm_stencil_desc;
+
+typedef struct sm_depth_stencil_desc {
+	uint32_t depth_compare_function;
+	bool depth_write_enabled;
+	sm_stencil_desc front, back;
+} sm_depth_stencil_desc;
+
+sm_depth_stencil *sm_depth_stencil_new(const sm_device *dev, const sm_depth_stencil_desc *d);
+void sm_depth_stencil_release(sm_depth_stencil *s);
 
 sm_render_encoder *sm_render_encoder_new(const sm_command_buffer *cb, const sm_render_pass_desc *d);
 bool sm_render_set_pipeline(sm_render_encoder *e, const sm_render_pipeline *p);
@@ -125,6 +168,14 @@ bool sm_render_set_fragment_texture(sm_render_encoder *e, const sm_texture *t, u
 bool sm_render_set_fragment_sampler(sm_render_encoder *e, const sm_sampler *s, uint32_t index);
 bool sm_render_set_viewport(sm_render_encoder *e, double x, double y, double w, double h, double znear, double zfar);
 bool sm_render_set_scissor(sm_render_encoder *e, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
+bool sm_render_set_depth_stencil(sm_render_encoder *e, const sm_depth_stencil *s); /* NULL = nil */
+bool sm_render_set_stencil_reference(sm_render_encoder *e, uint32_t front, uint32_t back);
+bool sm_render_set_cull_mode(sm_render_encoder *e, uint32_t mode);          /* MTLCullMode */
+bool sm_render_set_front_facing_winding(sm_render_encoder *e, uint32_t w);  /* MTLWinding */
+bool sm_render_set_depth_bias(sm_render_encoder *e, float bias, float slope_scale, float clamp);
+bool sm_render_set_depth_clip_mode(sm_render_encoder *e, uint32_t mode);    /* MTLDepthClipMode */
+bool sm_render_set_triangle_fill_mode(sm_render_encoder *e, uint32_t mode); /* MTLTriangleFillMode */
+bool sm_render_set_blend_color(sm_render_encoder *e, float r, float g, float b, float a);
 bool sm_render_draw(sm_render_encoder *e, uint32_t primitive, uint32_t start, uint32_t count,
 		    uint32_t instances, uint32_t base_instance);
 bool sm_render_draw_indexed(sm_render_encoder *e, uint32_t primitive, uint32_t index_count, uint32_t index_type,

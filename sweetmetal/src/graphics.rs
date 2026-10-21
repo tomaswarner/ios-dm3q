@@ -1,24 +1,33 @@
 //! Textures, samplers, render and blit: the second slice of the C API. Every Metal enum or
 //! option set crosses as its raw value (`MTLPixelFormat`, `MTLTextureUsage`, `MTLLoadAction`,
 //! ...), so SweetMetal.bundle passes its descriptors' properties through unchanged; an unknown
-//! value fails the call with the runtime's error.
+//! value fails the call with the runtime's error. Slice 3 adds vertex descriptors, depth/stencil
+//! states and attachments, and the encoder's fixed-function state.
 
 use crate::{boxed, set_error};
 use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::metal::{
-    BlendFactor, BlendOperation, ColorWriteMask, IndexType, PixelFormat, PrimitiveType,
-    SamplerAddressMode, SamplerMinMagFilter, SamplerMipFilter, TextureType, TextureUsage,
+    BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DepthClipMode,
+    IndexType, PixelFormat, PrimitiveType, SamplerAddressMode, SamplerMinMagFilter,
+    SamplerMipFilter, StencilOperation, TextureType, TextureUsage, TriangleFillMode, VertexFormat,
+    VertexStepFunction, Winding,
 };
-use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use metal2vulkan::pipeline::{
+    ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource, VertexAttributeDescriptor,
+    VertexBufferLayoutDescriptor, VertexDescriptor,
+};
 use metal2vulkan_runtime::{
     BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer, ComputeCommandEncoder,
-    Device, Function, LoadAction, Origin, PipelineOptions, Region, RenderCommandEncoder,
-    RenderPassDescriptor, RenderPipelineState, ResourceOptions, SamplerState, ScissorRect, Size,
-    StoreAction, Texture, TextureDescriptor, Viewport,
+    DepthStencilState, Device, Function, LoadAction, Origin, PipelineOptions, Region,
+    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, SamplerState,
+    ScissorRect, Size, StoreAction, Texture, TextureDescriptor, Viewport,
 };
 use std::ptr;
 
 const MAX_COLOR: usize = 8;
+/// `MTLVertexDescriptor`'s attribute and buffer layout slots.
+const MAX_VERTEX: usize = 31;
 
 /// A raw Metal enum value as its runtime type, or the error in [`crate::sm_last_error`].
 fn raw<T: TryFrom<u32>>(value: u32) -> Option<T>
@@ -43,6 +52,7 @@ unsafe fn opt<'a, T>(p: *const T) -> Option<&'a T> {
 release_fn!(sm_texture_release, Texture);
 release_fn!(sm_sampler_release, SamplerState);
 release_fn!(sm_render_pipeline_release, RenderPipelineState);
+release_fn!(sm_depth_stencil_release, DepthStencilState);
 
 // ---- textures ---------------------------------------------------------------------------
 
@@ -192,7 +202,32 @@ pub struct SmColorAttachment {
     pub write_mask: u32,
 }
 
-/// `MTLRenderPipelineDescriptor`'s properties (no vertex descriptor yet: shaders read buffers).
+/// One `MTLVertexAttributeDescriptor`, raw; `format` 0 (Invalid) = unset.
+#[repr(C)]
+pub struct SmVertexAttribute {
+    pub format: u32,
+    pub offset: u32,
+    pub buffer_index: u32,
+}
+
+/// One `MTLVertexBufferLayoutDescriptor`, raw; `stride` 0 = unset (Metal's default layout),
+/// `u32::MAX` = `MTLBufferLayoutStrideDynamic`.
+#[repr(C)]
+pub struct SmVertexLayout {
+    pub stride: u32,
+    pub step_function: u32,
+    pub step_rate: u32,
+}
+
+/// `MTLVertexDescriptor`: attributes and buffer layouts by index.
+#[repr(C)]
+pub struct SmVertexDescriptor {
+    pub attributes: [SmVertexAttribute; MAX_VERTEX],
+    pub layouts: [SmVertexLayout; MAX_VERTEX],
+}
+
+/// `MTLRenderPipelineDescriptor`'s properties; a null `vertex_descriptor` is nil (shaders read
+/// buffers themselves).
 #[repr(C)]
 pub struct SmRenderPipelineDesc {
     pub vertex: *const Function,
@@ -201,6 +236,26 @@ pub struct SmRenderPipelineDesc {
     pub depth_format: u32,
     pub stencil_format: u32,
     pub raster_sample_count: u32,
+    pub vertex_descriptor: *const SmVertexDescriptor,
+}
+
+unsafe fn vertex_descriptor(d: &SmVertexDescriptor) -> Option<VertexDescriptor> {
+    let mut vd = VertexDescriptor::new();
+    for (i, a) in d.attributes.iter().enumerate() {
+        if a.format != 0 {
+            let format = raw::<VertexFormat>(a.format)?;
+            vd.attributes.insert(i as u32, VertexAttributeDescriptor::new(format, a.offset, a.buffer_index));
+        }
+    }
+    for (i, l) in d.layouts.iter().enumerate() {
+        if l.stride != 0 {
+            let mut layout = VertexBufferLayoutDescriptor::new((l.stride != u32::MAX).then_some(l.stride));
+            layout.step_function = raw::<VertexStepFunction>(l.step_function)?;
+            layout.step_rate = l.step_rate;
+            vd.layouts.insert(i as u32, layout);
+        }
+    }
+    Some(vd)
 }
 
 unsafe fn color_attachment(c: &SmColorAttachment) -> Option<ColorAttachmentDescriptor> {
@@ -245,7 +300,65 @@ pub unsafe extern "C" fn sm_render_pipeline_new(
     if d.raster_sample_count != 0 {
         rd.raster_sample_count = d.raster_sample_count;
     }
+    if let Some(v) = opt(d.vertex_descriptor) {
+        let Some(vd) = vertex_descriptor(v) else { return ptr::null_mut() };
+        rd.vertex_descriptor = Some(vd);
+    }
     boxed((*dev).new_render_pipeline_state(&rd, &PipelineOptions::default()))
+}
+
+// ---- depth/stencil states ----------------------------------------------------------------
+
+/// `MTLStencilDescriptor`, raw.
+#[repr(C)]
+pub struct SmStencilDesc {
+    pub compare_function: u32,
+    pub stencil_failure_operation: u32,
+    pub depth_failure_operation: u32,
+    pub depth_stencil_pass_operation: u32,
+    pub read_mask: u32,
+    pub write_mask: u32,
+}
+
+/// `MTLDepthStencilDescriptor`, raw.
+#[repr(C)]
+pub struct SmDepthStencilDesc {
+    pub depth_compare_function: u32,
+    pub depth_write_enabled: bool,
+    pub front: SmStencilDesc,
+    pub back: SmStencilDesc,
+}
+
+fn stencil(s: &SmStencilDesc) -> Option<StencilDescriptor> {
+    let mut d = StencilDescriptor::default();
+    d.stencil_compare_function = raw::<CompareFunction>(s.compare_function)?;
+    d.stencil_failure_operation = raw::<StencilOperation>(s.stencil_failure_operation)?;
+    d.depth_failure_operation = raw::<StencilOperation>(s.depth_failure_operation)?;
+    d.depth_stencil_pass_operation = raw::<StencilOperation>(s.depth_stencil_pass_operation)?;
+    d.read_mask = s.read_mask;
+    d.write_mask = s.write_mask;
+    Some(d)
+}
+
+/// `newDepthStencilStateWithDescriptor:`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_depth_stencil_new(dev: *const Device, d: *const SmDepthStencilDesc) -> *mut DepthStencilState {
+    if dev.is_null() || d.is_null() {
+        set_error("null argument");
+        return ptr::null_mut();
+    }
+    let d = &*d;
+    let mut dd = DepthStencilDescriptor::default();
+    let (Some(compare), Some(front), Some(back)) =
+        (raw::<CompareFunction>(d.depth_compare_function), stencil(&d.front), stencil(&d.back))
+    else {
+        return ptr::null_mut();
+    };
+    dd.depth_compare_function = compare;
+    dd.depth_write_enabled = d.depth_write_enabled;
+    dd.front_face_stencil = front;
+    dd.back_face_stencil = back;
+    boxed((*dev).new_depth_stencil_state(&dd))
 }
 
 // ---- render passes and encoders ---------------------------------------------------------
@@ -261,9 +374,34 @@ pub struct SmPassColor {
     pub clear_color: [f64; 4],
 }
 
+/// `MTLRenderPassDepthAttachmentDescriptor` / `...StencilAttachmentDescriptor`, raw; a null
+/// texture = unused. `clear_depth` is read for depth, `clear_stencil` for stencil.
+#[repr(C)]
+pub struct SmPassDepthStencil {
+    pub texture: *const Texture,
+    pub level: u64,
+    pub slice: u64,
+    pub load_action: u32,
+    pub store_action: u32,
+    pub clear_depth: f64,
+    pub clear_stencil: u32,
+}
+
 #[repr(C)]
 pub struct SmRenderPassDesc {
     pub color: [SmPassColor; MAX_COLOR],
+    pub depth: SmPassDepthStencil,
+    pub stencil: SmPassDepthStencil,
+}
+
+fn actions(load: u32, store: u32) -> Option<(LoadAction, StoreAction)> {
+    match (LoadAction::from_raw(load.into()), StoreAction::from_raw(store.into())) {
+        (Ok(l), Ok(s)) => Some((l, s)),
+        (Err(e), _) | (_, Err(e)) => {
+            set_error(e);
+            None
+        }
+    }
 }
 
 /// `renderCommandEncoderWithDescriptor:`.
@@ -278,13 +416,7 @@ pub unsafe extern "C" fn sm_render_encoder_new(
     let mut pass = RenderPassDescriptor::new();
     for (i, c) in (*d).color.iter().enumerate() {
         let Some(t) = opt(c.texture) else { continue };
-        let (load, store) = match (LoadAction::from_raw(c.load_action.into()), StoreAction::from_raw(c.store_action.into())) {
-            (Ok(l), Ok(s)) => (l, s),
-            (Err(e), _) | (_, Err(e)) => {
-                set_error(e);
-                return ptr::null_mut();
-            }
-        };
+        let Some((load, store)) = actions(c.load_action, c.store_action) else { return ptr::null_mut() };
         let a = &mut pass.color_attachments[i];
         a.texture = Some(t.clone());
         a.level = c.level;
@@ -293,6 +425,27 @@ pub unsafe extern "C" fn sm_render_encoder_new(
         a.store_action = store;
         let [r, g, b, al] = c.clear_color;
         a.clear_color = ClearColor::new(r, g, b, al);
+    }
+    let (d, s) = (&(*d).depth, &(*d).stencil);
+    if let Some(t) = opt(d.texture) {
+        let Some((load, store)) = actions(d.load_action, d.store_action) else { return ptr::null_mut() };
+        let a = &mut pass.depth_attachment;
+        a.texture = Some(t.clone());
+        a.level = d.level;
+        a.slice = d.slice;
+        a.load_action = load;
+        a.store_action = store;
+        a.clear_depth = d.clear_depth;
+    }
+    if let Some(t) = opt(s.texture) {
+        let Some((load, store)) = actions(s.load_action, s.store_action) else { return ptr::null_mut() };
+        let a = &mut pass.stencil_attachment;
+        a.texture = Some(t.clone());
+        a.level = s.level;
+        a.slice = s.slice;
+        a.load_action = load;
+        a.store_action = store;
+        a.clear_stencil = s.clear_stencil;
     }
     boxed((*cb).render_command_encoder(&pass))
 }
@@ -352,6 +505,74 @@ pub unsafe extern "C" fn sm_render_set_viewport(
 #[no_mangle]
 pub unsafe extern "C" fn sm_render_set_scissor(e: *mut RenderCommandEncoder, x: u64, y: u64, w: u64, h: u64) -> bool {
     !e.is_null() && ok((*e).set_scissor_rect(ScissorRect { x, y, width: w, height: h }))
+}
+
+/// `setDepthStencilState:` (null = nil: Metal's default state).
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_depth_stencil(e: *mut RenderCommandEncoder, s: *const DepthStencilState) -> bool {
+    !e.is_null() && ok((*e).set_depth_stencil_state(opt(s)))
+}
+
+/// `setStencilFrontReferenceValue:backReferenceValue:`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_stencil_reference(e: *mut RenderCommandEncoder, front: u32, back: u32) -> bool {
+    if e.is_null() {
+        return false;
+    }
+    (*e).set_stencil_reference_values(front, back);
+    true
+}
+
+/// `setCullMode:` (raw `MTLCullMode`).
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_cull_mode(e: *mut RenderCommandEncoder, mode: u32) -> bool {
+    let Some(m) = raw::<CullMode>(mode) else { return false };
+    if e.is_null() {
+        return false;
+    }
+    (*e).set_cull_mode(m);
+    true
+}
+
+/// `setFrontFacingWinding:` (raw `MTLWinding`).
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_front_facing_winding(e: *mut RenderCommandEncoder, winding: u32) -> bool {
+    let Some(w) = raw::<Winding>(winding) else { return false };
+    if e.is_null() {
+        return false;
+    }
+    (*e).set_front_facing_winding(w);
+    true
+}
+
+/// `setDepthBias:slopeScale:clamp:`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_depth_bias(e: *mut RenderCommandEncoder, bias: f32, slope_scale: f32, clamp: f32) -> bool {
+    !e.is_null() && ok((*e).set_depth_bias(bias, slope_scale, clamp))
+}
+
+/// `setDepthClipMode:` (raw `MTLDepthClipMode`).
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_depth_clip_mode(e: *mut RenderCommandEncoder, mode: u32) -> bool {
+    let Some(m) = raw::<DepthClipMode>(mode) else { return false };
+    !e.is_null() && ok((*e).set_depth_clip_mode(m))
+}
+
+/// `setTriangleFillMode:` (raw `MTLTriangleFillMode`).
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_triangle_fill_mode(e: *mut RenderCommandEncoder, mode: u32) -> bool {
+    let Some(m) = raw::<TriangleFillMode>(mode) else { return false };
+    !e.is_null() && ok((*e).set_triangle_fill_mode(m))
+}
+
+/// `setBlendColorRed:green:blue:alpha:`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_blend_color(e: *mut RenderCommandEncoder, r: f32, g: f32, b: f32, a: f32) -> bool {
+    if e.is_null() {
+        return false;
+    }
+    (*e).set_blend_color(r, g, b, a);
+    true
 }
 
 /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` (raw `MTLPrimitiveType`).
