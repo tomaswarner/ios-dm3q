@@ -1,0 +1,111 @@
+diff -ruN a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c	2026-10-20 22:16:56
++++ b/osfmk/arm64/sleh.c	2026-10-20 22:17:16
+@@ -1847,6 +1847,50 @@
+ 	__builtin_unreachable();
+ }
+ 
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++
++/*
++ * DM3Q bring-up heartbeat: once a second the timer IRQ redraws
++ * "HB n=<timer irqs> pc=<interrupted pc> lr=<lr> m=<spsr mode>" in the
++ * bottom band. Counting n shows timer interrupts arrive; pc/lr show where
++ * the CPU is (idle loop vs a spin) when boot stops making progress.
++ */
++static uint64_t sweet_hb_count, sweet_hb_last;
++
++static char *
++sweet_hb_hex(char *p, const char *label, uint64_t v, int digits)
++{
++	while (*label) {
++		*p++ = *label++;
++	}
++	for (int i = digits - 1; i >= 0; i--) {
++		*p++ = "0123456789abcdef"[(v >> (4 * i)) & 0xf];
++	}
++	*p++ = ' ';
++	return p;
++}
++
++static void
++sweet_heartbeat(arm_saved_state_t *state)
++{
++	uint64_t now = ml_get_timebase();
++	sweet_hb_count++;
++	if (now - sweet_hb_last < 19200000ULL) {     /* 1 s at 19.2 MHz */
++		return;
++	}
++	sweet_hb_last = now;
++	char buf[96], *p = buf;
++	p = sweet_hb_hex(p, "HB n=", sweet_hb_count, 8);
++	p = sweet_hb_hex(p, "pc=", get_saved_state_pc(state), 16);
++	p = sweet_hb_hex(p, "lr=", get_saved_state_lr(state), 16);
++	p = sweet_hb_hex(p, "m=", get_saved_state_cpsr(state) & 0xf, 1);
++	p = sweet_hb_hex(p, "t=", now >> 24, 6);
++	*p = 0;
++	sweet_early_status(buf);
++}
++#endif /* SWEET */
++
+ void
+ sleh_irq(arm_saved_state_t *state)
+ {
+@@ -1868,6 +1912,7 @@
+ 		return; /* spurious */
+ 	}
+ 	if (intid == sweet_vtimer_intid) {
++		sweet_heartbeat(state);
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+ 		cdp->cpu_decrementer = -1; /* Large */
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+diff -ruN a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c	2026-10-20 22:16:56
++++ b/osfmk/arm64/sweet_early.c	2026-10-20 22:17:16
+@@ -134,6 +134,34 @@
+ 	sweet_early_mark(9, "kernel framebuffer VA live");
+ }
+ 
++/*
++ * DM3Q bring-up: one status line in the bottom band (below the console rows,
++ * where the stage marks go), redrawn in place. Ignores early_disabled so the
++ * timer heartbeat in sleh.c stays visible after the console hand-over.
++ */
++void
++sweet_early_status(const char *s)
++{
++	const unsigned int y0 = EARLY_HEIGHT - EARLY_CELL_H;
++	for (unsigned int col = 0; col < EARLY_COLS; col++) {
++		unsigned char c = *s ? (unsigned char)*s++ : ' ';
++		const unsigned char *glyph = iso_font + c * 16;
++		for (unsigned int gy = 0; gy < 16; gy++) {
++			for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
++				volatile uint32_t *line = EARLY_FB +
++				    (y0 + gy * EARLY_SCALE + sy) * EARLY_STRIDE + col * EARLY_CELL_W;
++				for (unsigned int gx = 0; gx < 8; gx++) {
++					uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffff00u : 0xff0000a0u;
++					for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
++						line[gx * EARLY_SCALE + sx] = pixel;
++					}
++				}
++			}
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ void
+ sweet_early_disable(void)
+ {
+diff -ruN a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h	2026-10-20 22:16:56
++++ b/osfmk/arm64/sweet_early.h	2026-10-20 22:17:16
+@@ -12,6 +12,7 @@
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
++void sweet_early_status(const char *s);
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {

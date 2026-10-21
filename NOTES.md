@@ -43,6 +43,13 @@
   trapped MMIO from the ESR syndrome; post-indexed/pair accesses have ISV=0 -> injected SEA**. Rule for all
   DM3Q code: emulated MMIO (vGIC, ...) only with plain single-register LDR/STR (shim helpers now inline asm,
   `shim/out/dm3q-gic3-boot.img`). The kernel's gicr_write32 compiles to a plain STR (it booted).
+- **gic3 result (IMG_5721): timer + SGI delivery WORK under Gunyah** (VTIMER 30 irqs/300 ms, hppi 27; SGI1 10/10;
+  GICD_CTLR 0xD0->0xD3). UFS still times out (ABL UTRLBA now 0xC70EC000: varies per boot).
+  xnu stall point identified from source: bsd_init -> bsd_bufferinit ("buffer headers") -> **IOKitInitializeTime()**
+  = waitForService(IORTC, 30 s), no RTC driver -> should time out after 30 s like on sweet, but never returns.
+  xnu uses CNTV_TVAL/CNTVCT like the shim. Patch **0100-dm3q-timer-heartbeat**: the timer IRQ redraws
+  `HB n= pc= lr= m= t=` once a second in the bottom band (sweet_early_status), to see whether timer IRQs
+  arrive inside xnu and where the CPU is.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
