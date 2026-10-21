@@ -14,7 +14,7 @@
 
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Device,
-    Function, Library, PipelineOptions, ResourceOptions, Size,
+    DeviceOptions, Function, Library, MetalLevel, PipelineOptions, ResourceOptions, Size,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, CStr};
@@ -83,10 +83,14 @@ release_fn!(sm_library_release, Library);
 release_fn!(sm_function_release, Function);
 release_fn!(sm_compute_pipeline_release, ComputePipelineState);
 
-/// `MTLCreateSystemDefaultDevice()`: the runtime's preferred Vulkan device.
+/// `MTLCreateSystemDefaultDevice()`: the runtime's preferred Vulkan device. The Metal level
+/// (which measured Metal release the device answers as) is pinned to the newest: iOS gets it
+/// anyway (not macOS), and a macOS host without a measured release would refuse the device.
 #[no_mangle]
 pub extern "C" fn sm_device_create() -> *mut Device {
-    boxed(Device::system_default())
+    let mut options = DeviceOptions::default();
+    options.metal_level = Some(MetalLevel::NEWEST);
+    boxed(Device::system_default_with(&options))
 }
 
 /// The device name (`-[MTLDevice name]`), copied into `buf` (NUL-terminated, truncated).
@@ -138,6 +142,24 @@ pub unsafe extern "C" fn sm_library_new_with_data(dev: *const Device, data: *con
         return ptr::null_mut();
     }
     boxed((*dev).new_library_with_data(std::slice::from_raw_parts(data, len)))
+}
+
+/// Bare AIR bitcode (raw or in a bitcode wrapper, the `.air` that `metal -c` writes) as a
+/// library. No Metal counterpart (`newLibraryWithData:` refuses AIR); used for shaders we build
+/// ourselves and for tests.
+#[no_mangle]
+pub unsafe extern "C" fn sm_library_new_with_air(dev: *const Device, data: *const u8, len: usize) -> *mut Library {
+    if dev.is_null() || data.is_null() {
+        set_error("null argument");
+        return ptr::null_mut();
+    }
+    match metal2vulkan::library::Library::from_air(std::slice::from_raw_parts(data, len)) {
+        Ok(l) => Box::into_raw(Box::new((*dev).new_library_with_compile_library(l))),
+        Err(e) => {
+            set_error(e);
+            ptr::null_mut()
+        }
+    }
 }
 
 /// `newFunctionWithName:`.

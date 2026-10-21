@@ -9,6 +9,7 @@ license = "LGPL-3.0-or-later"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+metal2vulkan = { path = "../../third_party/metal2vulkan/crates/metal2vulkan" }
 metal2vulkan-runtime = { path = "../../third_party/metal2vulkan/crates/metal2vulkan-runtime" }
 
 [profile.release]

@@ -286,6 +286,12 @@
   from_air + new_library_with_compile_library) and a C smoke test running runtime_examples.ll's
   scale_and_offset (output[i] = input[i]*scale + i) on host lavapipe, then aarch64-apple-ios build, then
   textures/blit/render/IOSurface, then the ObjC bundle + kernel IOAcceleratorES behind sweetmetal=1.
+  **Done (2026-10-21 13:15):** `sm_library_new_with_air` + `include/sweetmetal.h` + `tests/smoke.c`
+  (runtime_examples.bc = Homebrew llvm-as of the fixture .ll). sm_device_create pins
+  `metal_level = MetalLevel::NEWEST` (macOS 26.6 host is unmeasured -> refused; iOS gets NEWEST anyway).
+  Host run: `cc -Iinclude tests/smoke.c target/release/libsweetmetal.a -o target/c/smoke`,
+  VK_ICD_FILENAMES=<lvp_devenv_icd json> DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib -> 1024/1024, SWEETMETAL OK.
+  NEXT: aarch64-apple-ios build of libsweetmetal.a + smoke as a sweettest test on the phone.
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner
   (`tools/sweettest/`, `tools/add-sweettest.sh`; launchd run-once job, tests chosen by boot-arg
   `sweettest=a,b`, output via /dev/null + `sweetnull=...` to the USB live log; no network service).
