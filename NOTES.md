@@ -301,6 +301,12 @@
   cmdline `sweettest=sm_smoke sweetnull=backboardd,SpringBoard,sweettest,sm_smoke` (m2v_rt no longer runs
   at boot). TO FLASH: USERDATA test3.simg + BOOT x20s, cable plugged before boot; expect
   `|sm_smoke| 1024/1024 correct` / `SWEETMETAL OK` in the USB live log.
+  **sweetrun (no more USERDATA flashes for userland tests):** `tools/sweettest/sweetrun.c` launchd KeepAlive
+  daemon, TCP 192.168.7.2:5141 only (USB link), token ~/.sweetrun-token (baked in by `tools/add-sweetrun.sh`,
+  not in git); uploads files to /usr/local/sweettest/ and runs one, output streamed back. Mac:
+  `tools/sweetrun.py -f FILE... NAME [ARGS]` (e.g. `-f third_party/sweettest-ios/sm_smoke sm_smoke`).
+  Host-tested on 127.0.0.1 (run/exit code, '/' names and wrong token refused). Root **test4** = test3 +
+  sweetrun (`apple/ios16-root-test4.simg`), untested on the phone.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner
