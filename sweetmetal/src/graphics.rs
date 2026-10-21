@@ -19,11 +19,13 @@ use metal2vulkan::pipeline::{
 };
 use metal2vulkan_runtime::{
     BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer, ComputeCommandEncoder,
-    DepthStencilState, Device, Function, LoadAction, Origin, PipelineOptions, Region,
+    DepthStencilState, Device, Function, HostMemory, IoSurfacePlane, LoadAction, Origin,
+    PipelineOptions, Region,
     RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, SamplerState,
     ScissorRect, Size, StoreAction, Texture, TextureDescriptor, Viewport,
 };
-use std::ptr;
+use std::ffi::c_void;
+use std::ptr::{self, NonNull};
 
 const MAX_COLOR: usize = 8;
 /// `MTLVertexDescriptor`'s attribute and buffer layout slots.
@@ -71,26 +73,13 @@ pub struct SmTextureDesc {
     pub resource_options: u64,
 }
 
-/// `newTextureWithDescriptor:`.
-#[no_mangle]
-pub unsafe extern "C" fn sm_texture_new(dev: *const Device, d: *const SmTextureDesc) -> *mut Texture {
-    if dev.is_null() || d.is_null() {
-        set_error("null argument");
-        return ptr::null_mut();
-    }
-    let d = &*d;
+unsafe fn texture_descriptor(d: &SmTextureDesc) -> Option<TextureDescriptor> {
     let (Some(ty), Some(format), Some(usage)) =
         (raw::<TextureType>(d.texture_type), raw::<PixelFormat>(d.pixel_format), raw::<TextureUsage>(d.usage))
     else {
-        return ptr::null_mut();
+        return None;
     };
-    let options = match ResourceOptions::from_raw(d.resource_options) {
-        Ok(o) => o,
-        Err(e) => {
-            set_error(e);
-            return ptr::null_mut();
-        }
-    };
+    let options = ResourceOptions::from_raw(d.resource_options).map_err(set_error).ok()?;
     let mut td = TextureDescriptor::texture_2d(format, d.width, d.height, false);
     td.texture_type = ty;
     td.depth = d.depth.max(1);
@@ -99,7 +88,69 @@ pub unsafe extern "C" fn sm_texture_new(dev: *const Device, d: *const SmTextureD
     td.array_length = d.array_length.max(1);
     td.usage = usage;
     td.resource_options = options;
+    Some(td)
+}
+
+/// `newTextureWithDescriptor:`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_texture_new(dev: *const Device, d: *const SmTextureDesc) -> *mut Texture {
+    if dev.is_null() || d.is_null() {
+        set_error("null argument");
+        return ptr::null_mut();
+    }
+    let Some(td) = texture_descriptor(&*d) else { return ptr::null_mut() };
     boxed((*dev).new_texture(&td))
+}
+
+/// `newTextureWithDescriptor:iosurface:plane:`, over `buf`: the caller's no-copy buffer of the
+/// surface's bytes ([`sm_buffer_new_no_copy`] at `IOSurfaceGetBaseAddress`). `offset` and
+/// `bytes_per_row` are the plane's (0 and `IOSurfaceGetBytesPerRow` without planes); `planar` =
+/// `IOSurfaceGetPlaneCount` > 0.
+#[no_mangle]
+pub unsafe extern "C" fn sm_texture_new_iosurface(
+    buf: *const Buffer, d: *const SmTextureDesc, offset: u64, bytes_per_row: u64, planar: bool,
+) -> *mut Texture {
+    if buf.is_null() || d.is_null() {
+        set_error("null argument");
+        return ptr::null_mut();
+    }
+    let Some(td) = texture_descriptor(&*d) else { return ptr::null_mut() };
+    boxed((*buf).new_texture_with_iosurface_plane(&td, IoSurfacePlane::new(offset, bytes_per_row, planar)))
+}
+
+/// `newBufferWithBytesNoCopy:length:options:deallocator:` callback: `(pointer, length, ctx)`.
+pub type SmDeallocator = Option<unsafe extern "C" fn(*mut u8, u64, *mut c_void)>;
+
+struct Ctx(*mut c_void);
+// SAFETY: the caller's context is theirs to make thread-safe (the deallocator runs on a runtime
+// thread, as Metal's block does).
+unsafe impl Send for Ctx {}
+
+/// `newBufferWithBytesNoCopy:length:options:deallocator:` (raw `MTLResourceOptions`); the
+/// deallocator (may be null) runs once with `ctx` when the buffer's last use is gone.
+#[no_mangle]
+pub unsafe extern "C" fn sm_buffer_new_no_copy(
+    dev: *const Device, bytes: *mut u8, length: u64, options: u64, dealloc: SmDeallocator, ctx: *mut c_void,
+) -> *mut Buffer {
+    let (Some(dev), Some(p)) = (opt(dev), NonNull::new(bytes)) else {
+        set_error("null argument");
+        return ptr::null_mut();
+    };
+    let options = match ResourceOptions::from_raw(options) {
+        Ok(o) => o,
+        Err(e) => {
+            set_error(e);
+            return ptr::null_mut();
+        }
+    };
+    let ctx = Ctx(ctx);
+    let dealloc = dealloc.map(|f| -> metal2vulkan_runtime::Deallocator {
+        Box::new(move |p: NonNull<u8>, len: u64| {
+            let ctx = ctx;
+            f(p.as_ptr(), len, ctx.0)
+        })
+    });
+    boxed(dev.new_buffer_with_bytes_no_copy(HostMemory::new(p), length, options, dealloc))
 }
 
 /// `-[MTLTexture width]`, `height`, `pixelFormat` (raw).

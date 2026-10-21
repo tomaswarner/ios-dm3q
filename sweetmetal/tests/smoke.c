@@ -2,6 +2,8 @@
  *   compute: scale_and_offset (output[i] = input[i]*scale + i)
  *   render:  colored_vertex/colored_fragment, a triangle into an 8x8 render target, blit readback
  *   texture: invert_texels (compute, texture read/write), replaceRegion/getBytes
+ *   surface: the render test into a texture over host pages (no-copy buffer, IOSurface plane),
+ *            read back by the CPU straight from the pages; the deallocator runs at release
  *   depth:   slice3.bc attr_vertex/attr_fragment: vertex descriptor (float3 + uchar4 normalized,
  *            interleaved), depth Less, stencil Replace/Equal, back-face culling
  * Usage: smoke [KERNEL.bc [SLICE3.bc]] (default: the phone's sweettest copies, so the
@@ -10,6 +12,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #define N 1024
 #define SIDE 8
@@ -179,6 +183,95 @@ static int test_render(sm_device *dev, sm_library *lib, sm_queue *q)
 	sm_function_release(vf);
 	sm_function_release(ff);
 	return bad != 0;
+}
+
+static int deallocated;
+
+static void on_dealloc(void *bytes, uint64_t len, void *ctx)
+{
+	munmap(bytes, len);
+	*(int *)ctx = 1;
+}
+
+static int test_surface(sm_device *dev, sm_library *lib, sm_queue *q)
+{
+	sm_function *vf = sm_library_function(lib, "colored_vertex");
+	sm_function *ff = sm_library_function(lib, "colored_fragment");
+	sm_render_pipeline_desc pd;
+	memset(&pd, 0, sizeof(pd));
+	pd.vertex = vf;
+	pd.fragment = ff;
+	pd.color[0].pixel_format = MTLPixelFormatRGBA8Unorm;
+	pd.color[0].source_rgb_blend_factor = pd.color[0].source_alpha_blend_factor = 1;
+	pd.color[0].write_mask = MTLColorWriteMaskAll;
+	sm_render_pipeline *rp = vf && ff ? sm_render_pipeline_new(dev, &pd) : NULL;
+	size_t page = (size_t)getpagesize();
+	uint8_t *mem = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	memset(mem, 0xaa, page);
+	sm_buffer *surface = sm_buffer_new_no_copy(dev, mem, page, 0, on_dealloc, &deallocated);
+	sm_texture_desc td = {
+		.texture_type = MTLTextureType2D, .pixel_format = MTLPixelFormatRGBA8Unorm,
+		.width = SIDE, .height = SIDE, .depth = 1, .mipmap_level_count = 1, .sample_count = 1,
+		.array_length = 1, .usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead,
+		.resource_options = 0,
+	};
+	/* rows 64 bytes apart (wider than the 32-byte texel rows), plane at 256 */
+	sm_texture *target = surface ? sm_texture_new_iosurface(surface, &td, 256, 64, false) : NULL;
+	if (!rp || !target) {
+		fail("surface pipeline/texture");
+		return 1;
+	}
+	/* bottom-right quarter, green */
+	const float pos[6][2] = { { 0, 0 }, { 1, 0 }, { 0, -1 }, { 1, 0 }, { 1, -1 }, { 0, -1 } };
+	float col[6][4];
+	for (int i = 0; i < 6; i++) {
+		col[i][0] = col[i][2] = 0.0f;
+		col[i][1] = col[i][3] = 1.0f;
+	}
+	sm_render_pass_desc pass;
+	memset(&pass, 0, sizeof(pass));
+	pass.color[0].texture = target;
+	pass.color[0].load_action = MTLLoadActionClear;
+	pass.color[0].store_action = MTLStoreActionStore;
+	pass.color[0].clear_color[0] = 1.0;
+	pass.color[0].clear_color[3] = 1.0;
+	sm_command_buffer *cb = sm_command_buffer_new(q);
+	sm_render_encoder *re = sm_render_encoder_new(cb, &pass);
+	if (!re || !sm_render_set_pipeline(re, rp) || !sm_render_set_vertex_bytes(re, pos, sizeof(pos), 0) ||
+	    !sm_render_set_vertex_bytes(re, col, sizeof(col), 1) ||
+	    !sm_render_draw(re, MTLPrimitiveTypeTriangle, 0, 6, 1, 0) || !sm_render_end_encoding(re) ||
+	    !sm_command_buffer_commit(cb) || !sm_command_buffer_wait(cb)) {
+		fail("surface encode/run");
+		return 1;
+	}
+	static const uint8_t green[4] = { 0, 255, 0, 255 }, red[4] = { 255, 0, 0, 255 };
+	int bad = 0;
+	for (int y = 0; y < SIDE; y++)
+		for (int x = 0; x < SIDE; x++) {
+			const uint8_t *p = mem + 256 + y * 64 + x * 4;
+			const uint8_t *want = x >= SIDE / 2 && y >= SIDE / 2 ? green : red;
+			if (memcmp(p, want, 4) && bad++ < 4)
+				printf("  surface (%d,%d) = %d %d %d %d\n", x, y, p[0], p[1], p[2], p[3]);
+		}
+	/* the padding between rows and before the plane is the surface's, untouched */
+	int pad = 0;
+	for (int i = 0; i < 256; i++)
+		pad += mem[i] != 0xaa;
+	for (int y = 0; y < SIDE; y++)
+		for (int i = 32; i < 64; i++)
+			pad += mem[256 + y * 64 + i] != 0xaa;
+	printf("surface: %d/%d texels correct in host memory, %d padding bytes touched\n",
+	       SIDE * SIDE - bad, SIDE * SIDE, pad);
+	sm_command_buffer_release(cb);
+	sm_texture_release(target);
+	sm_buffer_release(surface);
+	sm_render_pipeline_release(rp);
+	sm_function_release(vf);
+	sm_function_release(ff);
+	for (int i = 0; i < 200 && !deallocated; i++)
+		usleep(10000);
+	printf("surface: deallocator %s\n", deallocated ? "ran" : "DID NOT RUN");
+	return bad != 0 || pad != 0 || !deallocated;
 }
 
 static int test_texture(sm_device *dev, sm_library *lib, sm_queue *q)
@@ -416,6 +509,7 @@ int main(int argc, char **argv)
 	int bad = test_compute(dev, lib, q);
 	bad += test_render(dev, lib, q);
 	bad += test_texture(dev, lib, q);
+	bad += test_surface(dev, lib, q);
 	bad += test_depth(dev, lib3, q);
 
 	sm_queue_release(q);

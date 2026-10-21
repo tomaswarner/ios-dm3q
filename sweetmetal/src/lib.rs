@@ -9,9 +9,9 @@
 //!
 //! Slices: device, buffers, command queue and buffer, library, function,
 //! compute pipeline state and compute encoding (here); textures, samplers,
-//! render pipelines and encoders, blit ([`graphics`]). IOSurface-backed
-//! textures, vertex descriptors, depth/stencil and events come next, in the
-//! order QuartzCore and CoreImage use them.
+//! render pipelines and encoders, blit, vertex descriptors, depth/stencil,
+//! no-copy buffers and IOSurface-backed textures ([`graphics`]). Events and
+//! the rest come next, in the order QuartzCore and CoreImage use them.
 
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Device,

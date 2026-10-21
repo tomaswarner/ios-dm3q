@@ -353,7 +353,12 @@
   passes on host lavapipe: 64/64. iOS sm_smoke built+signed in third_party/sweettest-ios with slice3.bc;
   NOT yet run on the phone (not connected): `tools/sweetrun.py -f third_party/sweettest-ios/sm_smoke -f
   third_party/sweettest-ios/slice3.bc -f sweetmetal/tests/runtime_examples.bc sm_smoke`.
-  NEXT: IOSurface-backed textures, then the
+  **slice 4 (same day):** `sm_buffer_new_no_copy` (newBufferWithBytesNoCopy + C deallocator/ctx) and
+  `sm_texture_new_iosurface` (Buffer::new_texture_with_iosurface_plane: offset, bytes_per_row, planar).
+  The bundle maps an IOSurface as a no-copy buffer at IOSurfaceGetBaseAddress and makes plane textures over
+  it. smoke `surface`: render into a texture over mmap'd host pages (plane at 256, rows 64 B apart) -> CPU
+  sees 64/64 texels in the pages, padding untouched, deallocator ran. Host OK; phone pending (same command).
+  NEXT: the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
