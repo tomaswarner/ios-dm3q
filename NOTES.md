@@ -205,6 +205,16 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Green screen = SpringBoard crash loop after the user enabled Accessibility > Bold Text (x10s/x11s/x12s,
+  log viewer IMG_5796-5798).** CRASH SpringBoard sig 11 pc 0 at CI::GLContext::init+204 (GetMacroContext ->
+  glDisable(GL_DEPTH_TEST) through an all-zero GL dispatch) <- CIContext contextWithOptions <-
+  CUIShapeEffectStack sharedCIContext <- CUICatalog imageByStylingImage <- UIImage
+  _imageWithStylePresets (bold glyph styling). No Metal device -> CIContext takes the EAGL path;
+  _wrapGLIsUsable always returns 1 and eagl_init proceeds even without an IOAcceleratorES service
+  (accel 0), so the EAGL context exists with no renderer. No CI_* knob disables GL. Not the CPU boost.
+  Fix applied: USERDATA re-flashed with the clean `apple/ios16-root-20H392.simg` + BOOT x12s (EPSS CPU
+  boost, no DDR votes). Avoid Bold Text until CIContext's GL path fails cleanly. Shared cache:
+  `apple/dsc/20H392__iPhone10,3_6/dyld_shared_cache_arm64` (ipsw extract --dyld).
 - **🎉 2026-10-21 ~02:40 local: TOUCH WORKS IN iOS on the S23 Ultra** (boot x10s, kernel out-dm3q-006,
   sweettouch=2): user reports the touch works on the lock screen / home screen. Next: buttons (PMK8550 PON
   KPDPWR/RESIN + vol+ GPIO), RTC, UFS HS-G2+, USB live log, battery.
