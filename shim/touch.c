@@ -45,6 +45,14 @@
 #define SE_RXFIFO_ST	0x804
 #define SE_TX_WM	0x80c
 #define SE_HW_PARAM0	0xe24
+#define SE_FORCE_DEF	0x020
+#define SE_OUTPUT_CTRL	0x024
+#define SE_CGC_CTRL	0x028
+#define SE_M_IRQ_EN	0x614
+#define SE_S_IRQ_CLR	0x648
+#define SE_GSI_EV_EN	0xe18
+#define SE_IRQ_EN	0xe1c
+#define SE_DMA_GEN_CFG	0xe30
 
 #define M_DONE		(1u << 0)
 #define M_TX_WM		(1u << 30)
@@ -105,6 +113,8 @@ static void cs(int high)
 	wr(io, (rd(io) & ~2u) | (high ? 2u : 0u));
 }
 
+static uint32_t last_fail_status, last_fail_irq, last_fail_fifo;
+
 /* One full-duplex FIFO transfer of n (<= 64) bytes, CS held low around it. */
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 {
@@ -149,6 +159,15 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 			rc = got == n ? 0 : -3;
 			break;
 		}
+	}
+	if (rc) {
+		last_fail_status = rd(SE + SE_STATUS);
+		last_fail_irq = rd(SE + SE_M_IRQ);
+		last_fail_fifo = (rd(SE + SE_TXFIFO_ST) & 0xffff) << 16 | (rd(SE + SE_RXFIFO_ST) & 0xffff);
+		wr(SE + SE_M_CTRL, 2);			/* M_GENI_CMD_ABORT */
+		wait_clear(SE + SE_STATUS, 1u, 20000);
+		for (int i = 0; i < 64 && (rd(SE + SE_RXFIFO_ST) & 0x1ffffffu); i++)
+			(void)rd(SE + SE_RXFIFO);
 	}
 	udelay(2);
 	cs(1);
@@ -226,6 +245,15 @@ void touch_probe(void)
 	gpio_cfg(46, 1, 2, 0, 0);	/* clk  */
 	gpio_cfg(47, 0, 2, 1, 1);	/* CS as GPIO, high */
 	gpio_cfg(25, 0, 0, 0, 0);	/* irq input */
+	/* geni_se_io_init + geni_se_irq_clear + geni_se_select_fifo_mode (Linux) */
+	wr(SE + SE_CGC_CTRL, rd(SE + SE_CGC_CTRL) | 0x7fu);
+	wr(SE + SE_DMA_GEN_CFG, rd(SE + SE_DMA_GEN_CFG) | 0xfu);
+	wr(SE + SE_OUTPUT_CTRL, 0x7fu);
+	wr(SE + SE_FORCE_DEF, 1u);
+	wr(SE + SE_GSI_EV_EN, 0);
+	wr(SE + SE_M_IRQ_CLR, 0xffffffffu);
+	wr(SE + SE_S_IRQ_CLR, 0xffffffffu);
+	wr(SE + SE_M_IRQ_EN, rd(SE + SE_M_IRQ_EN) | 1u | (1u << 3) | (1u << 5) | (1u << 26) | (1u << 27) | (1u << 30));
 	wr(SE + SE_DMA_MODE, 0);
 	wr(SE + SE_SPI_CPHA, 0);
 	wr(SE + SE_SPI_CPOL, 0);
@@ -254,6 +282,8 @@ void touch_probe(void)
 			udelay(20000);
 	}
 	con_hex2("STM RST", "rc/ready=", (uint32_t)rc << 8 | ready, "tries=", tries);
+	con_hex2("SPI FAIL", "st/irq=", last_fail_status << 16 | (last_fail_irq & 0xffff), "fifo t/r=", last_fail_fifo);
+	con_hex2("SPI FAIL", "irqhi=", last_fail_irq >> 16, "irqen=", rd(SE + SE_M_IRQ_EN));
 	con_hex2("STM EV", "", be(ev, 0, 1, 2, 3), "", be(ev, 4, 5, 6, 7));
 	uint8_t id[8] = { 0 };
 	rc = stm_read_reg(0x22, id, 5);		/* STM_TS_READ_DEVICE_ID */
