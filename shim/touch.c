@@ -456,48 +456,8 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		cs(0);
 		udelay(2);
 		uintptr_t txp = (uintptr_t)dma_tx, rxp = (uintptr_t)dma_rx;
-		static int first = 1;
-		if (first) {
-			/* touch9: TRE fetch works (rp moved past CONFIG0 and GO), reboot on the
-			 * DMA TRE.  Bisect: A = TX only, no event (DMA reads + SPI run);
-			 * B = TX only + IEOT (event write); C = duplex (RX data write). */
-			first = 0;
-			uint32_t tx_cfg = (8 - 4) | 1u << 24 | 1u << 25;
-			con_hex2("GPI A", "tx only, no event; tre at ", (uint32_t)(uintptr_t)&ch_ring[0][ch_wp[0] * 4], "", 0);
-			udelay(1500000);
-			ch_queue(0, tx_cfg, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
-			ch_queue(0, 1u /* SPI_TX */, 0, 0, TRE_GO << 16 | TF_CHAIN);
-			ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16);
-			ch_ring_db(0);
-			udelay(1500000);
-			con_hex2("GPI A", "ok txrp=", rd(CH_CNTXT(0) + 0x10), "st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
-			con_hex2("GPI A", "se mirq=", rd(SE + SE_M_IRQ), "se st=", rd(SE + SE_STATUS));
-			con_hex2("SE A", "clkro=", rd(SE + 0x060), "mclk/sel=", rd(SE + SE_MCLK_CFG) << 16 | (rd(SE + SE_CLK_SEL) & 0xffff));
-			con_hex2("SE A", "mcmd0=", rd(SE + 0x600), "ios=", rd(SE + 0x908));
-			con_hex2("SE A", "dmatx irq=", rd(SE + 0xc40), "len/in=", rd(SE + 0xc3c) << 16 | (rd(SE + 0xc54) & 0xffff));
-			con_hex2("SE A", "rcg cmd=", rd(GCC_S4_RCG), "cbcr=", rd(GCC + 0x184e4));
-			con_hex2("SE A", "txfifo st=", rd(SE + SE_TXFIFO_ST), "gp len=", rd(SE + 0x910));
-			con_hex2("SE A", "spi txlen=", rd(SE + SE_SPI_TXLEN), "rxlen=", rd(SE + SE_SPI_RXLEN));
-			con_hex2("SE A", "trans cfg=", rd(SE + SE_SPI_TRANS), "wordlen=", rd(SE + SE_SPI_WORDLEN));
-			con_hex2("SE A", "pre/post dly=", rd(SE + 0x274), "dly cnt=", rd(SE + 0x278));
-			con_hex2("SE A", "txpack0=", rd(SE + SE_TX_PACK0), "txpack1=", rd(SE + SE_TX_PACK1));
-			wr(SE + SE_M_IRQ_CLR, rd(SE + SE_M_IRQ));
-			udelay(1500000);
-			ch_queue(0, tx_cfg, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
-			ch_queue(0, 1u, 0, 0, TRE_GO << 16 | TF_CHAIN);
-			ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
-			ch_ring_db(0);
-			udelay(1500000);
-			dcache_flush(ev_ring, 64);
-			con_hex2("GPI B", "ok evrp=", rd(EV_CNTXT + 0x10), "st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
-			con_hex2("GPI B", "se mirq=", rd(SE + SE_M_IRQ), "se st=", rd(SE + SE_STATUS));
-			gpi_wait(ticks() + 19200);		/* log B's events */
-			udelay(1500000);
-			con_str("GPI C", "duplex (rx write) next");
-			udelay(2000000);
-		}
 		/* RX first (Linux issues rx before tx) */
-		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16 | TF_IEOT);
+		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16);	/* no IEOT on RX (downstream) */
 		ch_ring_db(1);
 		/* TX: CONFIG0 (8-bit word, mode 0, packing, clk src 0 div 2), GO duplex, DMA */
 		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
@@ -505,6 +465,8 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(0);
 		int done = gpi_wait(ticks() + 19200000 / 10);
+		if (done > 0 && (done & 1))
+			done = 3;			/* TX EOT = transfer done; RX has no IEOT */
 		udelay(2);
 		cs(1);
 		dcache_flush(dma_rx, sizeof(dma_rx));
@@ -693,10 +655,7 @@ void touch_probe(void)
 	gpi_init_rc = smmu_ok ? gpi_init() : 0xdead;
 	gpi_ok = !gpi_init_rc;
 	con_hex2("GPI", "init=", gpi_init_rc, "ch/ev st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
-	if (gpi_ok) {
-		con_str("GPI", "first DMA in 8 s: photograph now");
-		udelay(8000000);
-	}
+
 	con_hex2("PINS", "irq25=", rd(TLMM + 25 * 0x1000UL + 4) & 1, "cs47=", rd(TLMM + 47 * 0x1000UL + 4));
 
 	/* 4. STM: system reset, wait for READY (status event, type INFO, id 0) */
