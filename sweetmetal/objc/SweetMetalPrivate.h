@@ -50,6 +50,24 @@ BOOL sm_trace(void);
 
 NSError *sm_error(NSString *what);
 
+/* The pixel format sweetmetal stores for a Metal one. CoreAnimation renders the P3 display's
+ * surfaces ('b3a8') in the 32-bit extended-range formats; the kernel's framebuffer copies plane 0
+ * as BGRA8 and SDR content fits 8 bits, so those formats are stored as BGRA8 (same 4 bytes per
+ * pixel; the alpha plane of RGB10A8_2P_XR10 is not used). Textures report the format asked. */
+static inline uint32_t sm_pixel_format(MTLPixelFormat f)
+{
+	switch ((uint32_t)f) {
+	case 550: /* RGB10A8_2P_XR10 */
+	case 554: /* BGR10_XR */
+		return 80; /* BGRA8Unorm */
+	case 551: /* RGB10A8_2P_XR10_sRGB */
+	case 555: /* BGR10_XR_sRGB */
+		return 81; /* BGRA8Unorm_sRGB */
+	default:
+		return (uint32_t)f;
+	}
+}
+
 @interface SweetMTLBuffer : NSObject <MTLBuffer>
 @property (readonly) sm_buffer *sm;
 - (instancetype)initWithDevice:(id<MTLDevice>)device buffer:(sm_buffer *)b options:(MTLResourceOptions)options;

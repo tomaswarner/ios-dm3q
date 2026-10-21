@@ -465,6 +465,9 @@ MISSING_LOGGER
 {
 	if (!(self = [super init]))
 		return nil;
+	/* lavapipe rasterizes on LP_NUM_THREADS threads (all cores by default); leave two cores to
+	 * the rest of the system (USB, input, the window server's own threads) */
+	setenv("LP_NUM_THREADS", "6", 0);
 	_dev = sm_device_create();
 	if (!_dev) {
 		sm_error(@"device");

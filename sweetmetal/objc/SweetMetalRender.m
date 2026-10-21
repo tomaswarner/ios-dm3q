@@ -107,7 +107,7 @@ MISSING_LOGGER
 static sm_texture_desc texture_desc(MTLTextureDescriptor *d)
 {
 	return (sm_texture_desc){
-		.texture_type = (uint32_t)d.textureType, .pixel_format = (uint32_t)d.pixelFormat,
+		.texture_type = (uint32_t)d.textureType, .pixel_format = sm_pixel_format(d.pixelFormat),
 		.width = d.width, .height = d.height, .depth = d.depth,
 		.mipmap_level_count = d.mipmapLevelCount, .sample_count = d.sampleCount,
 		.array_length = d.arrayLength, .usage = (uint32_t)d.usage, .resource_options = d.resourceOptions,
@@ -268,7 +268,7 @@ static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
 	}
 	sm_texture_desc td = texture_desc(d);
 	sm_texture *t;
-	if (planes > 1) {
+	if (planes > 1 && td.pixel_format == (uint32_t)d.pixelFormat) {
 		sm_surface_facts facts = {
 			IOSurfaceGetPixelFormat(s), plane, IOSurfaceGetWidth(s), IOSurfaceGetHeight(s),
 			(uint64_t)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 1) - base), IOSurfaceGetBytesPerRowOfPlane(s, 1),
@@ -361,7 +361,7 @@ static sm_stencil_desc stencil_desc(MTLStencilDescriptor *s)
 	for (int i = 0; i < 8; i++) {
 		MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];
 		pd.color[i] = (sm_color_attachment){
-			(uint32_t)c.pixelFormat, c.blendingEnabled,
+			sm_pixel_format(c.pixelFormat), c.blendingEnabled,
 			(uint32_t)c.sourceRGBBlendFactor, (uint32_t)c.destinationRGBBlendFactor, (uint32_t)c.rgbBlendOperation,
 			(uint32_t)c.sourceAlphaBlendFactor, (uint32_t)c.destinationAlphaBlendFactor, (uint32_t)c.alphaBlendOperation,
 			(uint32_t)c.writeMask,
