@@ -77,7 +77,7 @@ static void cpu_domain(unsigned d)
 
 static void ddr_votes(void)
 {
-	static const char *const name[3] = { "MC0", "SH0", "ACV" };
+	static const char name[3][4] = { "MC0", "SH0", "ACV" };	/* no pointers: no ABS64 relocs */
 	uint32_t addr[3], data[3];
 	int n = 0;
 	for (int i = 0; i < 3; i++) {
