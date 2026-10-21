@@ -205,6 +205,11 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Kernel touch (0104, CI 39549169807 -> `xnu/out-dm3q-006`):** `bsd/dev/sweet_stm.c` (sweettouch=2) = the
+  shim recipe in xnu (kmem_alloc_contig DMA page, clean/flush_dcache64, 8 ms polling thread after
+  sweettouchdelay 45 s), maps 0..4095 -> panel 1440x3088 -> presented 1125x2436 (sweetfb_fill: x*1125/1440,
+  (y+15)*1125/1440) -> SweetHIDTouch input (minus 22/18). Shim payload path calls `touch_preboot()` (QUP1
+  BCM vote + S2DOS05 LDO2/LDO3). Image `shim/out/dm3q-x10s-boot.img` = x9s cmdline with sweettouch=2.
 - **TOUCH WORKS in the shim (touch20, IMG_5795, 2026-10-21):** the STM IC was unpowered. S2DOS05
   (display PMIC, i2c-gpio SDA GPIO20 / SCL GPIO21, addr 0x60) EN reg 0x03 read 0x19 (L2/L3 off);
   RMW to 0x1F (LDO2 tsp_io 1.8 V bit 1, LDO3 tsp_avdd 3.0 V bit 2) -> HW id 36 40 01 00, ready on the
