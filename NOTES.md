@@ -145,6 +145,13 @@
   but TUR/CAP/READ then all time out. G4 needs more (Linux pwr_change_notify / adapt / PHY HS tables).
   ufs11: `ufs_pick_gear` walks HS-G1..G4 rate B with a TUR after each, keeps the highest that works
   (falls back to PWM-G1).
+- **ufs11 result (IMG_5742): HS-G1 rate B x2 works** (TUR/CAP/READ/GPT OK); HS-G2 is accepted (UPMCRS 1) but
+  TUR then fails -> stepped back to G1. G2+ need more (PHY rate/adapt). Good enough to boot iOS.
+- **Boot x5 = first iOS boot:** `shim/out/dm3q-x5-boot.img` = shim UFS bring-up (HS-G1) + kernel out-dm3q-003,
+  cmdline `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0
+  unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1
+  sweettouch=0 sweetkeys=0 sweetusb=0` (read-only root: no ufsrw/rootrw yet). userdata flashed with
+  `samloader flash -p USERDATA ../apple/ios16-root-20H392.img` (raw 16 GiB HFSX volume; erases Android data).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
