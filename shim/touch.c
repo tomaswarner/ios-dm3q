@@ -381,13 +381,28 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		udelay(2);
 		uintptr_t txp = (uintptr_t)dma_tx, rxp = (uintptr_t)dma_rx;
 		/* RX first (Linux issues rx before tx) */
+		static int first = 1;
+		if (first) {
+			con_hex2("GPI STEP", "1 rx tre at ", (uint32_t)(uintptr_t)ch_ring[1], "buf ", (uint32_t)rxp);
+			udelay(3000000);
+		}
 		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(1);
+		if (first) {
+			udelay(3000000);
+			con_hex2("GPI STEP", "2 rx db ok st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state(), "glob=", rd(GLOB_IRQ_STTS));
+			udelay(3000000);
+		}
 		/* TX: CONFIG0 (8-bit word, mode 0, packing, clk src 0 div 2), GO duplex, DMA */
 		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
 		ch_queue(0, 3u /* SPI_DUPLEX */, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
 		ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(0);
+		if (first) {
+			udelay(3000000);
+			con_hex2("GPI STEP", "3 tx db ok st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state(), "evrp=", rd(EV_CNTXT + 0x10));
+			first = 0;
+		}
 		int done = gpi_wait(ticks() + 19200000 / 10);
 		udelay(2);
 		cs(1);
@@ -569,6 +584,10 @@ void touch_probe(void)
 	gpi_init_rc = smmu_ok ? gpi_init() : 0xdead;
 	gpi_ok = !gpi_init_rc;
 	con_hex2("GPI", "init=", gpi_init_rc, "ch/ev st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
+	if (gpi_ok) {
+		con_str("GPI", "first DMA in 8 s: photograph now");
+		udelay(8000000);
+	}
 	con_hex2("PINS", "irq25=", rd(TLMM + 25 * 0x1000UL + 4) & 1, "cs47=", rd(TLMM + 47 * 0x1000UL + 4));
 
 	/* 4. STM: system reset, wait for READY (status event, type INFO, id 0) */
