@@ -380,42 +380,41 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		cs(0);
 		udelay(2);
 		uintptr_t txp = (uintptr_t)dma_tx, rxp = (uintptr_t)dma_rx;
-		/* RX first (Linux issues rx before tx) */
 		static int first = 1;
 		if (first) {
-			con_hex2("GPI STEP", "1 rx tre at ", (uint32_t)(uintptr_t)ch_ring[1], "buf ", (uint32_t)rxp);
+			/* touch9: TRE fetch works (rp moved past CONFIG0 and GO), reboot on the
+			 * DMA TRE.  Bisect: A = TX only, no event (DMA reads + SPI run);
+			 * B = TX only + IEOT (event write); C = duplex (RX data write). */
+			first = 0;
+			uint32_t tx_cfg = (8 - 4) | 1u << 24 | 1u << 25;
+			con_hex2("GPI A", "tx only, no event; tre at ", (uint32_t)(uintptr_t)&ch_ring[0][ch_wp[0] * 4], "", 0);
 			udelay(3000000);
-		}
-		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16 | TF_IEOT);
-		ch_ring_db(1);
-		if (first) {
-			udelay(3000000);
-			con_hex2("GPI STEP", "2 rx db ok st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state(), "rxrp=", rd(CH_CNTXT(1) + 0x10));
-			udelay(3000000);
-			/* TX one TRE per doorbell: which one kills the SoC? */
-			ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+			ch_queue(0, tx_cfg, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+			ch_queue(0, 1u /* SPI_TX */, 0, 0, TRE_GO << 16 | TF_CHAIN);
+			ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16);
 			ch_ring_db(0);
 			udelay(3000000);
-			con_hex2("GPI STEP", "3 config0 ok txrp=", rd(CH_CNTXT(0) + 0x10), "err=", rd(GPII_ERR));
+			con_hex2("GPI A", "ok txrp=", rd(CH_CNTXT(0) + 0x10), "st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
 			udelay(3000000);
-			ch_queue(0, 3u, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
-			ch_ring_db(0);
-			udelay(3000000);
-			con_hex2("GPI STEP", "4 go ok txrp=", rd(CH_CNTXT(0) + 0x10), "st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
-			udelay(3000000);
+			ch_queue(0, tx_cfg, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+			ch_queue(0, 1u, 0, 0, TRE_GO << 16 | TF_CHAIN);
 			ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 			ch_ring_db(0);
 			udelay(3000000);
-			con_hex2("GPI STEP", "5 dma ok txrp=", rd(CH_CNTXT(0) + 0x10), "evrp=", rd(EV_CNTXT + 0x10));
-			first = 0;
-			goto wait;
+			dcache_flush(ev_ring, 64);
+			con_hex2("GPI B", "ok evrp=", rd(EV_CNTXT + 0x10), "ev w3=", ev_ring[3]);
+			udelay(3000000);
+			con_str("GPI C", "duplex (rx write) next");
+			udelay(2000000);
 		}
+		/* RX first (Linux issues rx before tx) */
+		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16 | TF_IEOT);
+		ch_ring_db(1);
 		/* TX: CONFIG0 (8-bit word, mode 0, packing, clk src 0 div 2), GO duplex, DMA */
 		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
 		ch_queue(0, 3u /* SPI_DUPLEX */, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
 		ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(0);
-	wait:;
 		int done = gpi_wait(ticks() + 19200000 / 10);
 		udelay(2);
 		cs(1);
