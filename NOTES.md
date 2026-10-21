@@ -205,6 +205,16 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **lavapipe for iOS 16 arm64 BUILT (2026-10-21, first known):** `third_party/mesa/build-ios/src/gallium/targets/
+  lavapipe/libvulkan_lvp.dylib` (70 MB, platform iOS minos 16.0, deps only libSystem + libc++, exports
+  vk_icdGetInstanceProcAddr). Recipe: LLVM 23.1.4 static for iOS (`third_party/llvm-ios`; cmake
+  CMAKE_SYSTEM_NAME=iOS, AArch64 only, CMAKE_MACOSX_BUNDLE=OFF, LLVM_NO_DEAD_STRIP=ON, native tblgen from
+  llvm-build-host via LLVM_NATIVE_TOOL_DIR/LLVM_TABLEGEN/LLVM_MIN_TABLEGEN); `tools/mesa-ios-arm64.cross` +
+  `tools/llvm-config-ios.py` (host llvm-config rewritten: iOS paths, existing static libs only, drops
+  Polly/z3/zlib/host paths, no RTTI); paths via the space-free symlink ~/hios; meson -Dzlib=disabled
+  -Dshader-cache=disabled -Dcpp_rtti=false (+ the host option set). Import check against the iOS 16.7
+  shared cache: every libSystem/libc++ symbol exists (only memset_pattern16 / dyld_stub_binder not in the
+  symtab dump, both present); lvp_* weak entry points stay unresolved by design.
 - **Host testbed works (2026-10-21):** Mesa main af17d14 lavapipe built on macOS (`third_party/mesa/build-host`,
   meson -Dvulkan-drivers=swrast -Dgallium-drivers=llvmpipe -Dplatforms= ..., link needs -L/opt/homebrew/lib for
   zstd; brew meson ninja cmake llvm(23.1.4) glslang vulkan-loader, venv third_party/venv with mako/pyyaml).
