@@ -460,6 +460,22 @@
   offset/bpr) written + built, NOT installed: sweetrun timed out, then the live log stopped and en9 went
   inactive (phone hung? USB starved by full-CPU lavapipe rendering?). Open: AppleCLCD present of 'b3a8'
   surfaces (our framebuffer path expects BGRA).
+  **🎉🎉 2026-10-21 ~21:30: iOS 16 LOCK SCREEN RENDERED THROUGH METAL on the S23 (user confirmed).**
+  backboardd/SpringBoard on CA::OGL::MetalContext -> SweetMetal.bundle -> metal2vulkan -> Vulkan -> lavapipe
+  (CPU, 6 threads), boot x21s (xnu 0109 IOAcceleratorES nub, sweetmetal=1), no crashes for minutes. Fixed on
+  the live system (sweetrun: sm_install + sm_kill backboardd SpringBoard; launchd respawns them):
+  - green screen: CA renders the P3 display's 'b3a8' surfaces (RGB10A8_2P_XR10 / BGR10_XR) and the kernel
+    framebuffer copies plane 0 as BGRA -> driver stores the 32-bit XR formats as BGRA8 (sm_pixel_format).
+  - kernel IOSurface (0046) has no per-plane facts (plane bpr 0) -> plane 0 = base + surface row pitch.
+  - buffer textures (newTextureWithDescriptor:offset:bytesPerRow:, newLinearTextureWithDescriptor:...).
+  - lavapipe SIGSEGV in util_copy_box (shadow copy-in at execution): CA munmaps a no-copy buffer's pages
+    right after releasing it (safe on Apple GPUs, which wire the pages) while our queue lags (62 commits,
+    24 completed) -> each no-copy buffer gets its own vm_remap of the pages (shared), freed by the runtime's
+    deallocator; -contents still answers the caller's pointer. mtl_probe tests write-after-create +
+    munmap-before-completion.
+  Tools: crash symbolization = kernel log CRASH lines + `SWEETMETAL image` load addresses (atos on
+  libvulkan_lvp.dylib / ipsw dyld a2s); traces on while /var/tmp/sweetmetal_trace exists (sm_touch).
+  Open: newHeapWithDescriptor (SpringBoard asks, tolerates nil), speed (CPU rendering), touch/UI check.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
