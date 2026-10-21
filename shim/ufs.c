@@ -32,8 +32,17 @@
 
 #define BLOCK		4096u
 
-static inline uint32_t ufs_rd(uint32_t off) { return *(volatile uint32_t *)(UFS_BASE + off); }
-static inline void ufs_wr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(UFS_BASE + off) = v; }
+/* plain LDR/STR only (see shim.c: Gunyah cannot emulate writeback/pair MMIO) */
+static inline uint32_t ufs_rd(uint32_t off)
+{
+	uint32_t v;
+	__asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(UFS_BASE + off) : "memory");
+	return v;
+}
+static inline void ufs_wr(uint32_t off, uint32_t v)
+{
+	__asm__ volatile("str %w0, [%1]" : : "r"(v), "r"((uintptr_t)UFS_BASE + off) : "memory");
+}
 
 /* UTP transfer request descriptor (32 bytes). */
 struct utrd {

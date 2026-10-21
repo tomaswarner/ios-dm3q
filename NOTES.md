@@ -39,7 +39,10 @@
   irq counts), then the UFS probe, then holds.
 - **gic1 result (IMG_5716/5717):** SEA (ESR 0x96000010) at FAR 0x17190400 = GICR SGI frame IPRIORITYR+0 from
   the shim's `wr8`: **Gunyah's vGIC aborts byte accesses**; the kernel's pe_fiq.c uses 32-bit writes (OK).
-  Shim fixed (32-bit RMW) -> `shim/out/dm3q-gic2-boot.img`. Rule for all DM3Q drivers: GIC MMIO 32-bit only.
+  gic2 (32-bit writes) aborted the same way: ELR = `str w1, [x0], #4`. Real cause: **Gunyah emulates
+  trapped MMIO from the ESR syndrome; post-indexed/pair accesses have ISV=0 -> injected SEA**. Rule for all
+  DM3Q code: emulated MMIO (vGIC, ...) only with plain single-register LDR/STR (shim helpers now inline asm,
+  `shim/out/dm3q-gic3-boot.img`). The kernel's gicr_write32 compiles to a plain STR (it booted).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

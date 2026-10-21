@@ -50,10 +50,28 @@
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
 #define isb() __asm__ volatile("isb" ::: "memory")
 
-static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
-static inline uint64_t rd64(uintptr_t a) { return *(volatile uint64_t *)a; }
-static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
-static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
+/*
+ * MMIO with plain single-register LDR/STR only: Gunyah emulates trapped
+ * accesses (the vGIC) from the ESR syndrome, which a post-indexed or pair
+ * access does not have (ISV=0) -> it injects an external abort. DM3Q gic2:
+ * `str w1, [x0], #4` from a priority loop aborted at GICR+0x10400.
+ */
+static inline uint32_t rd32(uintptr_t a)
+{
+	uint32_t v;
+	__asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(a) : "memory");
+	return v;
+}
+static inline uint64_t rd64(uintptr_t a)
+{
+	uint64_t v;
+	__asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(a) : "memory");
+	return v;
+}
+static inline void wr32(uintptr_t a, uint32_t v)
+{
+	__asm__ volatile("str %w0, [%1]" : : "r"(v), "r"(a) : "memory");
+}
 
 extern char secondary_entry[];
 
