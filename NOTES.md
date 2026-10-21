@@ -435,6 +435,12 @@
   ca_probe full screen 1125x2436, 20 rounded translucent layers, 8 cores: first frame ~613 ms (lavapipe
   JIT), steady frame ~50 ms (~20 fps, CPU), CA's encode 1-9 ms. (Frames 1/4 "NOT SEEN" = the probe renders
   before CARenderer picks up the new transaction; nothing drawn, not a driver fault.)
+  **DYLD_INSERT_LIBRARIES is not an option:** our AMFI registers as "SWEET AMFI" without mpo_policy_syscall,
+  so dyld's amfi_check_dyld_policy_self fails and dyld ignores DYLD_* vars (enabling it = kernel change).
+  **Boot x21s READY (not flashed):** `shim/out/dm3q-x21s-boot.img` = kernel out-dm3q-011 (0109 nub) + x20s
+  cmdline minus sweettest, sweetnull=backboardd,SpringBoard, + sweetmetal=1. Bundle installed on the phone's
+  root. Expect: backboardd/SpringBoard use Metal (CA::OGL::MetalContext) on lavapipe; first frames slow
+  (JIT); `SWEETMETAL missing:` lines in the USB live log (sweetnull). Fallback: flash x20s.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the

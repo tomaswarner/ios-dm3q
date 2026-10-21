@@ -88,14 +88,18 @@ int main(int argc, char **argv)
 	@autoreleasepool {
 		const char *path = argc > 1 ? argv[1] : "/System/Library/Extensions/SweetMetal.bundle";
 		setenv("SWEETMETAL_TRACE", "1", 0);
-		printf("MTLCreateSystemDefaultDevice before: %p\n", (__bridge void *)MTLCreateSystemDefaultDevice());
-		Class cls = [[NSBundle bundleWithPath:@(path)] classNamed:@"SweetMTLDevice"];
-		id<MTLDevice> dev = [(id)[cls alloc] initWithAcceleratorPort:0];
+		id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+		printf("MTLCreateSystemDefaultDevice before: %p (%s)\n", (__bridge void *)dev, dev.name.UTF8String);
 		if (!dev) {
-			printf("FAIL device\n");
-			return 1;
+			/* no IOAcceleratorES (kernel without sweetmetal=1): register ours in this process */
+			Class cls = [[NSBundle bundleWithPath:@(path)] classNamed:@"SweetMTLDevice"];
+			dev = [(id)[cls alloc] initWithAcceleratorPort:0];
+			if (!dev) {
+				printf("FAIL device\n");
+				return 1;
+			}
+			MTLAddDevice(dev);
 		}
-		MTLAddDevice(dev);
 		id<MTLDevice> sys = MTLCreateSystemDefaultDevice();
 		printf("MTLCreateSystemDefaultDevice after MTLAddDevice: %s (%s)\n", sys == dev ? "OURS" : "other",
 		       sys.name.UTF8String);
