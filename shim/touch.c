@@ -471,6 +471,11 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 			con_hex2("SE A", "mcmd0=", rd(SE + 0x600), "ios=", rd(SE + 0x908));
 			con_hex2("SE A", "dmatx irq=", rd(SE + 0xc40), "len/in=", rd(SE + 0xc3c) << 16 | (rd(SE + 0xc54) & 0xffff));
 			con_hex2("SE A", "rcg cmd=", rd(GCC_S4_RCG), "cbcr=", rd(GCC + 0x184e4));
+			con_hex2("SE A", "txfifo st=", rd(SE + SE_TXFIFO_ST), "gp len=", rd(SE + 0x910));
+			con_hex2("SE A", "spi txlen=", rd(SE + SE_SPI_TXLEN), "rxlen=", rd(SE + SE_SPI_RXLEN));
+			con_hex2("SE A", "trans cfg=", rd(SE + SE_SPI_TRANS), "wordlen=", rd(SE + SE_SPI_WORDLEN));
+			con_hex2("SE A", "pre/post dly=", rd(SE + 0x274), "dly cnt=", rd(SE + 0x278));
+			con_hex2("SE A", "loopback=", rd(SE + 0x22c), "s clk=", rd(SE + 0x04c));
 			wr(SE + SE_M_IRQ_CLR, rd(SE + SE_M_IRQ));
 			udelay(1500000);
 			ch_queue(0, tx_cfg, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
