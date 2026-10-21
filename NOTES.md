@@ -205,6 +205,11 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Adreno 740 firmware from the S23's own vendor partition (DYDC):** `tools/lpextract.py super.simg vendor
+  vendor.img` (sparse-aware LP reader; AP tar -> super.img.lz4 -> lz4) -> EROFS -> `fsck.erofs --extract`
+  (brew erofs-utils). Copied to `firmware/adreno-DYDC/` (not in git): a740_sqe.fw (96fee336...),
+  gmu_gen70200.bin (1a2a419c...), a740_zap.mdt/.b00-.b02/.mbn/.elf (Samsung-signed zap, 79c80e6a... mbn).
+  Full vendor tree in `firmware/extract-DYDC/vendor-x/` (105 files in vendor/firmware).
 - **Milestone A step 1 (offline, untested on the phone): CoreImage "no GL".** CIContext initWithOptions:
   no Metal (can_use_metal) -> CIGLIsUsable (= _wrapGLIsUsable, always 1) -> GL fallback unless the caller
   passes an option; CI::GLContext's constructor calls init even when CIEAGLContextCreate fails and init's
