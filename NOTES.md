@@ -102,6 +102,12 @@
   tlmm 210, vcc l17b 2.5 V, vccq l1g 1.2 V, vdd-hba l3g, PHY vdda l1d 0.88 V / pll l3e 1.2 V; tlmm
   gpio-reserved-ranges <36 4>, <50 2>. Linux toggles TLMM 210 from HLOS there, so the ufs5 SoC reset needs
   a second look (MMU-off access? offset?). U-Boot phones.rst: pinctrl/SMMU are the usual crashdump causes.
+- **RPMh in the shim (`shim/rpmh.c`, after U-Boot cmd-db/rpmh-rsc/rpmh-regulator):** apps RSC drv-2
+  0x17a20000, TCS base +0xd00, ACTIVE TCS 0, v3 register layout (v2.7 if major < 3); cmd-db 0x81c60000
+  (magic db 30 03 0c, entries 24 B after the 144 B header). VRM vote = voltage mV @+0, mode @+8 (PMIC5 LDO
+  HPM 7), enable @+4. Probe `shim/out/dm3q-pwr1-boot.img` (test_ufs_power): cmd-db addrs of ldob17/ldog1/
+  ldog3/ldod1/ldoe3/ldoe1, votes 2504/1200/1200/880/1200/880 mV, TCSR UFS_CLKREF_EN (0x1fd5110 bit 0) on,
+  then H8 exit + DME_PEER_GET; if the peer answers -> NOP/SSU/fDeviceInit/TUR/GPT, else HCE + link startup.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

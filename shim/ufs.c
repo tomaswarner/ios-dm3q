@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "ufs.h"
+#include "rpmh.h"
 
 #define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
 
@@ -433,10 +434,11 @@ static void ufs_clocks_on(void)
 }
 
 /* DME_PEER_GET: asks the UFS device end of the link (fails if it is asleep/off) */
-static void dme_peer_get(const char *label, uint32_t attr)
+static uint32_t dme_peer_get(const char *label, uint32_t attr)
 {
 	uint32_t v = 0, rc = uic(0x03, attr << 16, 0, &v);
 	con_hex2(label, "rc=", rc, "val=", v);
+	return rc;
 }
 
 /* What ABL last did: its transfer list is still in RAM. Show the used slots. */
@@ -551,6 +553,8 @@ static uint32_t query_flag(uint8_t func, uint8_t opcode, uint8_t idn)
 	return ucdp->resp[23];		/* flag value: LSB of the BE32 value at UPIU bytes 20-23 (Linux upiu_res.value) */
 }
 
+static void ufs_bringup_device(void);
+
 void test_ufs_wake(void)
 {
 	utrl = utrl_own;
@@ -601,6 +605,14 @@ void test_ufs_wake(void)
 		return;
 	}
 	ufs_wr(REG_IS, ufs_rd(REG_IS));
+	ufs_bringup_device();
+}
+
+/* Link is up: our list, NOP OUT, SSU Active, fDeviceInit, TUR, capacity, GPT (read-only). */
+static void ufs_bringup_device(void)
+{
+	uint32_t rc;
+	int tries = 0;
 
 	/* 4. our transfer list, NOP OUT until the device answers */
 	stage_str("ufs nop");
@@ -608,7 +620,6 @@ void test_ufs_wake(void)
 	ufs_wr(REG_UTRLBAU, (uint32_t)((uintptr_t)utrl >> 32));
 	ufs_wr(REG_UTRLRSR, 1);
 	uint32_t ocs = 0, st = 0, nop = 1;
-	int tries = 0;
 	for (; tries < 10 && nop; tries++)
 		nop = scsi(0, 0, 0, 0, 0, &ocs, &st);
 	con_hex2("NOP", "rc=", nop << 8 | ocs, "tries=", tries);
@@ -651,4 +662,56 @@ void test_ufs_wake(void)
 		con_hex2("LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
 	stage_str("ufs gpt");
 	read_gpt();
+}
+
+/* ---- DM3Q: power the UFS device and PHY back up through RPMh (U-Boot style) ---- */
+
+#define TCSR_UFS_CLKREF_EN	0x01fd5110UL	/* tcsr 0x1fc0000 + 0x15110 (tcsrcc-sm8550), bit 0 */
+
+void test_ufs_power(void)
+{
+	utrl = utrl_own;
+	ucdp = &ucd_own;
+	con_str("UFS", "dm3q rpmh power-up (read-only data)");
+	stage_str("rpmh probe");
+	uint32_t ver = rpmh_version();
+	con_hex2("RPMH", "ver=", ver, "tcs0 idle=", rpmh_tcs_idle());
+	if (!rpmh_cmddb_ok()) {
+		con_str("RPMH", "cmd-db magic bad: stop");
+		return;
+	}
+	con_hex2("CMDDB", "ldob17=", rpmh_cmddb_addr("ldob17"), "ldog1=", rpmh_cmddb_addr("ldog1"));
+	con_hex2("CMDDB", "ldog3=", rpmh_cmddb_addr("ldog3"), "ldod1=", rpmh_cmddb_addr("ldod1"));
+	con_hex2("CMDDB", "ldoe3=", rpmh_cmddb_addr("ldoe3"), "ldoe1=", rpmh_cmddb_addr("ldoe1"));
+
+	/* sm8550-samsung-q5q.dts / phone DT: VCC l17b 2.504 V, VCCQ l1g 1.2 V, HBA l3g 1.2 V,
+	 * PHY vdda l1d 0.88 V, PLL l3e 1.2 V, qref l1e 0.88 V */
+	stage_str("rpmh votes");
+	uint32_t v0 = (uint32_t)rpmh_vreg_on("ldob17", 2504, PMIC5_LDO_MODE_HPM);
+	uint32_t v1 = (uint32_t)rpmh_vreg_on("ldog1", 1200, PMIC5_LDO_MODE_HPM);
+	uint32_t v2 = (uint32_t)rpmh_vreg_on("ldog3", 1200, 0);
+	uint32_t v3 = (uint32_t)rpmh_vreg_on("ldod1", 880, PMIC5_LDO_MODE_HPM);
+	uint32_t v4 = (uint32_t)rpmh_vreg_on("ldoe3", 1200, 0);
+	uint32_t v5 = (uint32_t)rpmh_vreg_on("ldoe1", 880, 0);
+	con_hex2("VOTE", "vcc=", v0, "vccq=", v1);
+	con_hex2("VOTE", "hba=", v2, "phy=", v3);
+	con_hex2("VOTE", "pll=", v4, "qref=", v5);
+
+	stage_str("tcsr clkref");
+	uint32_t ref = mmio_rd(TCSR_UFS_CLKREF_EN);
+	mmio_wr(TCSR_UFS_CLKREF_EN, ref | 1);
+	udelay(5000);
+	con_hex2("CLKREF", "was=", ref, "now=", mmio_rd(TCSR_UFS_CLKREF_EN));
+
+	/* gentle path first: keep ABL's PHY calibration, just leave Hibern8 */
+	stage_str("ufs h8exit");
+	uint32_t h8 = uic(0x18, 0, 0, 0);
+	con_hex2("H8EXIT", "rc=", h8, "is=", ufs_rd(REG_IS));
+	ufs_wr(REG_IS, ufs_rd(REG_IS));
+	if (!dme_peer_get("PEER PWR", 0x1571)) {
+		ufs_bringup_device();
+		return;
+	}
+	/* otherwise host reset + link startup (ABL's PHY setup may not survive) */
+	test_ufs_wake();
 }
