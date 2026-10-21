@@ -95,9 +95,12 @@ static void ddr_votes(void)
 
 void perf_preboot(void)
 {
-	(void)rpmh_version();
-	if (rpmh_cmddb_ok())
-		ddr_votes();
+	/*
+	 * x11s: with the DDR votes the panel went solid green after the Apple
+	 * logo (display underrun?): the BCM votes replace ABL's from the same DRV
+	 * (ACV 0x8 alone likely drops its bits).  CPU only until that is understood.
+	 */
+	(void)ddr_votes;
 	for (unsigned d = 0; d < 3; d++)
 		cpu_domain(d);
 }
