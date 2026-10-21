@@ -205,6 +205,14 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Metal plan revised after prior-art search (2026-10-21):** github.com/steelbrain/metal2vulkan (Rust, 287*, active,
+  GPL/LGPL): metallib/AIR front end -> SPIR-V per stage + a Metal API runtime on Vulkan (docs/RUNTIME-PORTING.md,
+  METAL-COVERAGE.md; built for a paravirtualized GPU wrapping Metal, covers some Apple SPI). Stack: iOS app ->
+  SweetMetal.bundle (ObjC adapter, ours) -> metal2vulkan runtime -> Vulkan = Mesa Turnip (KGSL backend) ->
+  /dev/kgsl-3d0 KGSL ioctls emulated in XNU (ours) -> Adreno 740 (GMU/SQE/zap, ours). Intermediate: lavapipe
+  (Mesa CPU Vulkan) instead of Turnip = working Metal on the CPU. First offline check: translate iOS 16 system
+  metallibs (QuartzCore, CoreImage) with metal2vulkan. Other refs: YuAo/MetalLibraryArchive, zhuowei
+  MetalShaderTools, gzorin/LLAIR, Asahi IOKit-capture notes, Dybcio's a7xx msm series (GMU/SQE order).
 - **Adreno 740 firmware from the S23's own vendor partition (DYDC):** `tools/lpextract.py super.simg vendor
   vendor.img` (sparse-aware LP reader; AP tar -> super.img.lz4 -> lz4) -> EROFS -> `fsck.erofs --extract`
   (brew erofs-utils). Copied to `firmware/adreno-DYDC/` (not in git): a740_sqe.fw (96fee336...),
