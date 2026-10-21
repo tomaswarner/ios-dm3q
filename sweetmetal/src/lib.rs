@@ -90,7 +90,28 @@ release_fn!(sm_compute_pipeline_release, ComputePipelineState);
 pub extern "C" fn sm_device_create() -> *mut Device {
     let mut options = DeviceOptions::default();
     options.metal_level = Some(MetalLevel::NEWEST);
+    options.shader_cache.directory = shader_cache_dir();
+    options.shader_cache.capacity = 2 << 30;
     boxed(Device::system_default_with(&options))
+}
+
+/// Where translated shaders are cached: `SWEETMETAL_CACHE`, else the runtime's per-user default
+/// under `HOME`, else (launchd daemons and boot-time tests run without `HOME`)
+/// `/private/var/tmp/metal2vulkan-<uid>`.
+fn shader_cache_dir() -> Option<std::path::PathBuf> {
+    let set = |name| std::env::var_os(name).filter(|v| !v.is_empty());
+    if let Some(dir) = set("SWEETMETAL_CACHE") {
+        return Some(dir.into());
+    }
+    if set("HOME").is_some() {
+        return None;
+    }
+    let uid = unsafe { getuid() };
+    Some(format!("/private/var/tmp/metal2vulkan-{uid}").into())
+}
+
+extern "C" {
+    fn getuid() -> u32;
 }
 
 /// The device name (`-[MTLDevice name]`), copied into `buf` (NUL-terminated, truncated).

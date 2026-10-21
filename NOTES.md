@@ -307,6 +307,11 @@
   `tools/sweetrun.py -f FILE... NAME [ARGS]` (e.g. `-f third_party/sweettest-ios/sm_smoke sm_smoke`).
   Host-tested on 127.0.0.1 (run/exit code, '/' names and wrong token refused). Root **test4** = test3 +
   sweetrun (`apple/ios16-root-test4.simg`), untested on the phone.
+  **test3 result (loggrep shim `LOGGREP_PAT=sm_smoke`, 2026-10-21 13:38):** sm_smoke ran (before the Mac
+  receiver was listening) and failed: `FAIL device: no shader cache directory: no home directory for the
+  default shader cache directory` (launchd job has no HOME). Fix: sm_device_create sets the cache dir
+  (SWEETMETAL_CACHE, else runtime default under HOME, else /private/var/tmp/metal2vulkan-<uid>) and caps it
+  at 2 GiB; host run without HOME passes. Root test4 rebuilt = test2 + fixed sm_smoke + sweetrun.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner
