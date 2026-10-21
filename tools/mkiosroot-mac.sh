@@ -11,6 +11,7 @@
 # LZBITMAP/decmpfs-compressed and rsync reads them decompressed, so the HFS+
 # copy is plain data (the kernel's HFS has no decmpfs).
 set -euo pipefail
+# /bin/bash is 3.2 on macOS: empty arrays are "unbound" under set -u, hence ${a[@]+"${a[@]}"}
 
 [[ $# -ge 4 ]] || { sed -n '2,11p' "$0"; exit 2; }
 [[ $EUID == 0 ]] || { echo "run as root (sudo): owners and modes must be preserved" >&2; exit 1; }
@@ -22,7 +23,7 @@ RSYNC=/opt/homebrew/bin/rsync	# rsync 3: macOS' openrsync lacks reliable -H
 work=$(mktemp -d /private/tmp/mkiosroot.XXXXXX)
 devs=()
 cleanup() {
-	for d in "${devs[@]}"; do
+	for d in ${devs[@]+"${devs[@]}"}; do
 		hdiutil detach -quiet "$d" 2>/dev/null || hdiutil detach -force -quiet "$d" 2>/dev/null || true
 	done
 	rmdir "$work"/* "$work" 2>/dev/null || true
@@ -37,7 +38,7 @@ attach() {
 	mkdir "$work/$name"
 	local dev
 	dev=$(hdiutil attach -nobrowse -readonly -noverify -owners on -mountpoint "$work/$name" \
-		"${class[@]}" "$img" | awk 'NR==1{print $1}')
+		${class[@]+"${class[@]}"} "$img" | awk 'NR==1{print $1}')
 	devs+=("$dev")
 	mount | grep -q " on $work/$name " || { echo "$img: no volume mounted" >&2; exit 1; }
 	echo "$name: $img ($dev)"
@@ -49,7 +50,7 @@ attach "$appos" appos raw
 # Raw image file -> block device -> case-sensitive journaled HFS+
 mkfile -n "$size" "$out"
 rdev=$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage "$out" | awk 'NR==1{print $1}')
-devs=("$rdev" "${devs[@]}")
+devs=("$rdev" ${devs[@]+"${devs[@]}"})
 newfs_hfs -s -J -v iOSRoot "${rdev/disk/rdisk}"
 mkdir "$work/root"
 mount -t hfs -o owners,nobrowse "$rdev" "$work/root"
