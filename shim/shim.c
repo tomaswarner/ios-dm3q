@@ -410,6 +410,7 @@ void shim_main(uint64_t dtb)
 	extern char _payload_start[], _payload_end[];
 	if ((uintptr_t)_payload_end != (uintptr_t)_payload_start) {
 		test_ufs_linux();
+		touch_preboot();	/* QUP1 core clock vote + STM touch rails, for xnu's sweet_stm */
 		con_skip();
 	}
 	const char *why = loader_boot(dtb);

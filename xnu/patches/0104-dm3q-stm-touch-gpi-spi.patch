@@ -1,0 +1,837 @@
+diff -ruN a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files	2026-10-21 02:21:08
++++ b/bsd/conf/files	2026-10-21 02:21:08
+@@ -108,6 +108,7 @@
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/sweet_stm.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff -ruN a/bsd/dev/sweet_stm.c b/bsd/dev/sweet_stm.c
+--- a/bsd/dev/sweet_stm.c	1969-12-31 21:00:00
++++ b/bsd/dev/sweet_stm.c	2026-10-21 02:21:08
+@@ -0,0 +1,800 @@
++/*
++ * DM3Q (Galaxy S23 Ultra, SM8550) touch: STMicro fts2ba61y on QUP1 SE4 SPI
++ * (0xa90000), data through GPI DMA: the SE reads GENI_IF_DISABLE_RO = 1 (no
++ * FIFO interface).  Port of the shim probe that worked (port/shim/touch.c,
++ * touch20, 2026-10-21):
++ *  - power: S2DOS05 LDO2 (tsp_io 1.8 V) + LDO3 (tsp_avdd 3.0 V), EN reg 0x03
++ *    bits 1|2, on the i2c-gpio bus SDA GPIO20 / SCL GPIO21, address 0x60;
++ *  - SMMU (Gunyah's virtual MMU-500, unmatched streams fault): streams 0xb6
++ *    (gpi_dma1: TRE/event fetch) and 0xa3 (QUP wrapper: SE DMA data) get an
++ *    SMR + the UFS stream's S2CR (bypass is turned into fault);
++ *  - GPII 1 polled (no interrupts): TX = CONFIG0 + GO(duplex) + DMA(IEOT),
++ *    RX = DMA without IEOT (downstream spi-msm-geni); a TX DMA TRE without
++ *    IEOT never ends;
++ *  - STM protocol as Samsung's stm_spi.c: raw FA/A0 writes, events with 0x87
++ *    (data at rx[2]), other reads C0 reg then D1 00 00 + dummy (rx[4]).
++ * The shim votes the QUP1 core clock BCM and powers the IC before XNU starts.
++ * Boot-arg sweettouch=2 (sweet_touch_init).  One kernel thread, 8 ms polling.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void sweet_stm_start(void);
++
++#define STM_GCC_PA      0x00100000u
++#define STM_TLMM_PA     0x0f100000u
++#define STM_SE_PA       0x00a90000u
++#define STM_GPI_PA      0x00a10000u     /* GPII register pages (ee base 0x9f0000 + 0x20000) */
++#define STM_SMMU_PA     0x15000000u
++
++#define GCC_VOTE        0x52008u        /* wrap1 core_2x 18, core 19, m_ahb 20, s_ahb 21, s4 26 */
++#define GCC_S4_CBCR     0x184e4u
++
++#define TLMM_CFG(n)     ((uint32_t)(n) * 0x1000u)  /* pull [1:0], func [5:2], drive [8:6], oe 9 */
++#define TLMM_IO(n)      (TLMM_CFG(n) + 4u)          /* in 0, out 1 */
++#define PIN_SDA         20
++#define PIN_SCL         21
++#define PIN_IRQ         25
++#define PIN_CS          47
++
++#define SE_FORCE_DEF    0x020u
++#define SE_OUTPUT_CTRL  0x024u
++#define SE_CGC_CTRL     0x028u
++#define SE_STATUS       0x040u
++#define SE_MCLK         0x048u
++#define SE_IFDIS        0x064u
++#define SE_FW           0x068u
++#define SE_CLK_SEL      0x07cu
++#define SE_SPI_CPHA     0x224u
++#define SE_SPI_CPOL     0x230u
++#define SE_SPI_DEMUX    0x250u
++#define SE_DMA_MODE     0x258u
++#define SE_SPI_TRANS    0x25cu
++#define SE_TX_PACK0     0x260u
++#define SE_TX_PACK1     0x264u
++#define SE_SPI_WORDLEN  0x268u
++#define SE_RX_PACK0     0x284u
++#define SE_RX_PACK1     0x288u
++#define SE_M_IRQ_EN     0x614u
++#define SE_M_IRQ_CLR    0x618u
++#define SE_S_IRQ_CLR    0x648u
++#define SE_GSI_EV_EN    0xe18u
++#define SE_IRQ_EN       0xe1cu
++#define SE_DMA_GEN_CFG  0xe30u
++#define SE_PACK0        0x0007f8feu     /* geni_se_config_packing(8, 4, msb first) */
++#define SE_PACK1        0x000ffefeu
++
++/* GPII 1, offsets from STM_GPI_PA (Linux gpi.c GPII_n_* with n = 1, minus 0x20000) */
++#define GPI_CH_CNTXT(k) (0x4000u + 0x80u * (k))
++#define GPI_EV_CNTXT    0x5000u
++#define GPI_CH_DB(k)    (0x6000u + 0x8u * (k))
++#define GPI_EV_DB       0x6100u
++#define GPI_CH_CMD      0x7008u
++#define GPI_EV_CMD      0x7010u
++#define GPI_SRC_CH_IRQ  0x7090u
++#define GPI_SRC_EV_IRQ  0x7094u
++#define GPI_CH_IRQ_CLR  0x70a0u
++#define GPI_EV_IRQ_CLR  0x70a4u
++#define GPI_IEOB_CLR    0x70c0u
++#define GPI_SEID        4
++#define GPI_PROTO_SPI   1
++#define CMD_ALLOC       0
++#define CMD_START       1
++#define CMD_STOP        2
++#define CMD_RESET       9
++#define CMD_DEALLOC     10
++#define TRE_DMA         0x10u
++#define TRE_GO          0x20u
++#define TRE_CONFIG0     0x22u
++#define TF_CHAIN        (1u << 0)
++#define TF_IEOT         (1u << 9)
++#define TF_LINK         (1u << 11)
++#define EV_XFER_COMPL   0x22u
++#define CH_EL           64u
++#define EV_EL           128u
++
++/* DMA page: TX ring 0, RX ring 0x400, event ring 0x800 (aligned to their sizes), buffers */
++#define DMA_SIZE        0x4000u
++#define DMA_CH(k)       (0x400u * (k))
++#define DMA_EV          0x800u
++#define DMA_TX          0x1000u
++#define DMA_RX          0x1400u
++#define XFER_MAX        0x200u
++
++#define STM_FINGERS     10
++#define STM_EV_LEN      16u
++
++static struct {
++	vm_offset_t gcc, tlmm, se, gpi, smmu, dma;
++	uint64_t dma_pa;
++	unsigned ch_wp[2], ev_rp;
++	bool started, dead, fill;
++	uint32_t active;
++	int x[STM_FINGERS], y[STM_FINGERS];
++	unsigned errors;
++} stm;
++static int stm_sleep_chan;
++
++/* single plain LDR/STR (Gunyah emulates some of these pages: no pair/writeback forms) */
++static inline uint32_t
++rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v;
++	__asm__ volatile ("ldr %w0, [%1]" : "=r"(v) : "r"(base + off) : "memory");
++	return v;
++}
++
++static inline void
++wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile ("dsb sy\n\tstr %w0, [%1]" : : "r"(v), "r"(base + off) : "memory");
++}
++
++static void
++stm_sleep(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&stm_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++gpio_cfg(unsigned pin, unsigned func, unsigned drive_code, bool out, bool high)
++{
++	if (out) {
++		wr(stm.tlmm, TLMM_IO(pin), (rd(stm.tlmm, TLMM_IO(pin)) & ~2u) | (high ? 2u : 0u));
++	}
++	uint32_t v = rd(stm.tlmm, TLMM_CFG(pin)) & ~0x3ffu;
++	wr(stm.tlmm, TLMM_CFG(pin), v | (func << 2) | (drive_code << 6) | (out ? 0x200u : 0u));
++}
++
++static void
++cs(bool high)
++{
++	wr(stm.tlmm, TLMM_IO(PIN_CS), (rd(stm.tlmm, TLMM_IO(PIN_CS)) & ~2u) | (high ? 2u : 0u));
++}
++
++/* ---- S2DOS05 over the GPIO soft I2C (open drain by toggling OE; board pull-ups) ---- */
++
++static void
++od(unsigned pin, bool high)
++{
++	wr(stm.tlmm, TLMM_IO(pin), rd(stm.tlmm, TLMM_IO(pin)) & ~2u);
++	wr(stm.tlmm, TLMM_CFG(pin), (rd(stm.tlmm, TLMM_CFG(pin)) & ~0x3ffu) | (high ? 0u : 0x200u));
++}
++
++static bool
++od_in(unsigned pin)
++{
++	return rd(stm.tlmm, TLMM_IO(pin)) & 1u;
++}
++
++static void
++i2c_start(void)
++{
++	od(PIN_SDA, true); od(PIN_SCL, true); delay(5);
++	od(PIN_SDA, false); delay(5);
++	od(PIN_SCL, false); delay(5);
++}
++
++static void
++i2c_stop(void)
++{
++	od(PIN_SDA, false); delay(5);
++	od(PIN_SCL, true); delay(5);
++	od(PIN_SDA, true); delay(5);
++}
++
++static bool
++i2c_wbyte(uint8_t b)
++{
++	for (int i = 7; i >= 0; i--) {
++		od(PIN_SDA, (b >> i) & 1); delay(5);
++		od(PIN_SCL, true); delay(5);
++		for (int t = 0; t < 1000 && !od_in(PIN_SCL); t++) {
++			delay(1);                       /* clock stretching */
++		}
++		od(PIN_SCL, false);
++	}
++	od(PIN_SDA, true); delay(5);
++	od(PIN_SCL, true); delay(5);
++	bool ack = !od_in(PIN_SDA);
++	od(PIN_SCL, false); delay(5);
++	return ack;
++}
++
++static uint8_t
++i2c_rbyte(bool ack)
++{
++	uint8_t b = 0;
++	od(PIN_SDA, true);
++	for (int i = 0; i < 8; i++) {
++		delay(5);
++		od(PIN_SCL, true); delay(5);
++		b = (uint8_t)(b << 1 | od_in(PIN_SDA));
++		od(PIN_SCL, false);
++	}
++	od(PIN_SDA, !ack); delay(5);
++	od(PIN_SCL, true); delay(5);
++	od(PIN_SCL, false);
++	od(PIN_SDA, true);
++	return b;
++}
++
++static int
++pmic_rd(uint8_t reg, uint8_t *v)
++{
++	i2c_start();
++	bool ok = i2c_wbyte(0x60 << 1) && i2c_wbyte(reg);
++	if (ok) {
++		i2c_start();
++		ok = i2c_wbyte(0x60 << 1 | 1);
++		if (ok) {
++			*v = i2c_rbyte(false);
++		}
++	}
++	i2c_stop();
++	return ok ? 0 : EIO;
++}
++
++static int
++pmic_wr(uint8_t reg, uint8_t v)
++{
++	i2c_start();
++	bool ok = i2c_wbyte(0x60 << 1) && i2c_wbyte(reg) && i2c_wbyte(v);
++	i2c_stop();
++	return ok ? 0 : EIO;
++}
++
++/* returns true when LDO2 + LDO3 are on (only those EN bits are ever added) */
++static bool
++stm_power(void)
++{
++	uint8_t en = 0, en2 = 0;
++	od(PIN_SDA, true);
++	od(PIN_SCL, true);
++	delay(100);
++	if (pmic_rd(0x03, &en)) {
++		printf("SWEET STM: S2DOS05 no ACK; touch power unknown\n");
++		return false;
++	}
++	if ((en & 0x06) == 0x06) {
++		printf("SWEET STM: S2DOS05 EN %#x (touch rails already on)\n", en);
++		return true;
++	}
++	int error = pmic_wr(0x03, en | 0x06);
++	stm_sleep(50);
++	(void)pmic_rd(0x03, &en2);
++	printf("SWEET STM: S2DOS05 EN %#x -> %#x (write %d)\n", en, en2, error);
++	stm_sleep(150);                         /* IC boot after power-up */
++	return (en2 & 0x06) == 0x06;
++}
++
++/* ---- SMMU: route a stream like an existing one (UFS) ---- */
++
++static bool
++smmu_route_like(uint32_t sid, uint32_t like)
++{
++	uint32_t nsmr = rd(stm.smmu, 0x20) & 0xff, slot = ~0u, ref = ~0u;
++	if (nsmr > 0x100) {
++		nsmr = 0x100;                   /* SMRs 0x800 + 4n, S2CRs 0xc00 + 4n: inside the 4 KiB map */
++	}
++	for (uint32_t n = 0; n < nsmr; n++) {
++		uint32_t smr = rd(stm.smmu, 0x800 + 4 * n);
++		if (!(smr >> 31)) {
++			continue;
++		}
++		if (!((smr ^ sid) & ~(smr >> 16) & 0x7fff) && slot == ~0u) {
++			slot = n;
++		}
++		if (!((smr ^ like) & ~(smr >> 16) & 0x7fff) && ref == ~0u) {
++			ref = n;
++		}
++	}
++	if (ref == ~0u) {
++		return false;
++	}
++	uint32_t s2cr_ref = rd(stm.smmu, 0xc00 + 4 * ref);
++	if (slot == ~0u) {
++		for (uint32_t n = nsmr; n-- > 0;) {
++			if (!(rd(stm.smmu, 0x800 + 4 * n) >> 31)) {
++				slot = n;
++				break;
++			}
++		}
++	}
++	if (slot == ~0u) {
++		return false;
++	}
++	wr(stm.smmu, 0xc00 + 4 * slot, s2cr_ref);
++	wr(stm.smmu, 0x800 + 4 * slot, 1u << 31 | sid);
++	uint32_t s2cr = rd(stm.smmu, 0xc00 + 4 * slot);
++	printf("SWEET STM: SMMU sid %#x -> slot %u s2cr %#x (like %#x: %#x)\n", sid, slot, s2cr, like, s2cr_ref);
++	return ((s2cr >> 16) & 3) != 2;
++}
++
++/* ---- GPI DMA ---- */
++
++static inline uint32_t *
++dma_va(uint32_t off)
++{
++	return (uint32_t *)(stm.dma + off);
++}
++
++static inline uint32_t
++dma_pa(uint32_t off)
++{
++	return (uint32_t)(stm.dma_pa + off);
++}
++
++static void
++dma_clean(uint32_t off, uint32_t len)
++{
++	clean_dcache64((addr64_t)(stm.dma_pa + off), len, TRUE);
++}
++
++static void
++dma_flush(uint32_t off, uint32_t len)
++{
++	flush_dcache64((addr64_t)(stm.dma_pa + off), len, TRUE);
++}
++
++static uint32_t
++ch_state(unsigned k)
++{
++	return (rd(stm.gpi, GPI_CH_CNTXT(k)) >> 20) & 0xf;
++}
++
++static uint32_t
++ev_state(void)
++{
++	return (rd(stm.gpi, GPI_EV_CNTXT) >> 20) & 0xf;
++}
++
++/* channel/event ring command; done when the context state reaches want (any when want < 0) */
++static bool
++gpi_cmd(bool ev, uint32_t op, unsigned chid, int want)
++{
++	wr(stm.gpi, ev ? GPI_EV_CMD : GPI_CH_CMD, op << 24 | chid);
++	bool ok = want < 0;
++	for (unsigned i = 0; i < 50000 && !ok; i++) {
++		ok = (ev ? ev_state() : ch_state(chid)) == (uint32_t)want;
++		if (!ok) {
++			delay(1);
++		}
++	}
++	wr(stm.gpi, GPI_CH_IRQ_CLR, rd(stm.gpi, GPI_SRC_CH_IRQ));
++	wr(stm.gpi, GPI_EV_IRQ_CLR, rd(stm.gpi, GPI_SRC_EV_IRQ));
++	return ok;
++}
++
++static uint32_t
++gpi_init(void)
++{
++	for (unsigned k = 0; k < 2; k++) {
++		if (ch_state(k) == 2) {
++			(void)gpi_cmd(false, CMD_STOP, k, 3);
++		}
++		if (ch_state(k)) {
++			(void)gpi_cmd(false, CMD_RESET, k, 1);
++			(void)gpi_cmd(false, CMD_DEALLOC, k, 0);
++		}
++	}
++	if (ev_state()) {
++		(void)gpi_cmd(true, CMD_RESET, 0, -1);
++		(void)gpi_cmd(true, CMD_DEALLOC, 0, 0);
++	}
++	bzero((void *)stm.dma, DMA_SIZE);
++	dma_clean(0, DMA_SIZE);
++
++	/* gpi_config_interrupts(DEFAULT) state, though nothing is routed to us */
++	wr(stm.gpi, 0x7088, 0x7f);              /* TYPE_IRQ_MSK */
++	wr(stm.gpi, 0x70b8, 1);                 /* SRC_IEOB_IRQ_MSK */
++	wr(stm.gpi, 0x7098, 3);                 /* SRC_CH_IRQ_MSK */
++	wr(stm.gpi, 0x709c, 1);                 /* SRC_EV_CH_IRQ_MSK */
++	wr(stm.gpi, 0x7108, 0xf);               /* GLOB_IRQ_EN */
++	wr(stm.gpi, 0x7120, 0xf);               /* GPII_IRQ_EN */
++	wr(stm.gpi, 0x7180, 1);                 /* INTSET */
++
++	if (!gpi_cmd(true, CMD_ALLOC, 0, 1)) {
++		return 0x10 | ev_state();
++	}
++	wr(stm.gpi, GPI_EV_CNTXT + 0x00, 16u << 24 | 1u << 16 | 2u);   /* el size, INTTYPE_IRQ, GPI_EV */
++	wr(stm.gpi, GPI_EV_CNTXT + 0x04, EV_EL * 16);
++	wr(stm.gpi, GPI_EV_CNTXT + 0x08, dma_pa(DMA_EV));
++	wr(stm.gpi, GPI_EV_CNTXT + 0x0c, (uint32_t)((stm.dma_pa + DMA_EV) >> 32));
++	wr(stm.gpi, GPI_EV_DB + 4, (uint32_t)((stm.dma_pa + DMA_EV) >> 32));
++	for (uint32_t off = 0x20; off <= 0x34; off += 4) {
++		wr(stm.gpi, GPI_EV_CNTXT + off, 0);
++	}
++	stm.ev_rp = 0;
++	wr(stm.gpi, GPI_EV_DB, dma_pa(DMA_EV + (EV_EL - 1) * 16));
++
++	for (unsigned k = 0; k < 2; k++) {      /* chan 0 = TX (dir out), chan 1 = RX */
++		if (!gpi_cmd(false, CMD_ALLOC, k, 1)) {
++			return 0x20 | k << 3 | ch_state(k);
++		}
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x00, 16u << 24 | (k == 0 ? 1u : 0u) << 3 | 2u);
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x04, CH_EL * 16);
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x08, dma_pa(DMA_CH(k)));
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x0c, (uint32_t)((stm.dma_pa + DMA_CH(k)) >> 32));
++		wr(stm.gpi, GPI_CH_DB(k) + 4, (uint32_t)((stm.dma_pa + DMA_CH(k)) >> 32));
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x60, (uint32_t)(!k) << 16 | GPI_PROTO_SPI << 4 | GPI_SEID);
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x64, 0);
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x68, 0);
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x6c, 0);
++		wr(stm.gpi, GPI_CH_CNTXT(k) + 0x5c, 1);  /* QOS */
++		stm.ch_wp[k] = 0;
++	}
++	for (unsigned k = 0; k < 2; k++) {
++		if (!gpi_cmd(false, CMD_START, k, 2)) {
++			return 0x30 | k << 3 | ch_state(k);
++		}
++	}
++	return 0;
++}
++
++static void
++ch_queue(unsigned k, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
++{
++	uint32_t off = DMA_CH(k) + stm.ch_wp[k] * 16;
++	uint32_t *t = dma_va(off);
++	t[0] = d0; t[1] = d1; t[2] = d2; t[3] = d3;
++	dma_clean(off, 16);
++	stm.ch_wp[k] = (stm.ch_wp[k] + 1) % CH_EL;
++}
++
++static void
++ch_ring(unsigned k)
++{
++	wr(stm.gpi, GPI_CH_DB(k), dma_pa(DMA_CH(k) + stm.ch_wp[k] * 16));
++}
++
++/* consume events; bit k = transfer completion on chan k, < 0 = error event */
++static int
++gpi_events(void)
++{
++	int done = 0;
++	uint32_t hw = rd(stm.gpi, GPI_EV_CNTXT + 0x10);
++	unsigned hw_rp = ((hw - dma_pa(DMA_EV)) / 16) % EV_EL;
++	while (stm.ev_rp != hw_rp) {
++		uint32_t off = DMA_EV + stm.ev_rp * 16;
++		dma_flush(off, 16);
++		uint32_t *e = dma_va(off);
++		uint32_t type = (e[3] >> 16) & 0xff, chid = e[3] >> 24, code = e[2] >> 24;
++		if (type == EV_XFER_COMPL && chid < 2) {
++			if (code == 16) {               /* MSM_GPI_TCE_UNEXP_ERR */
++				done = -1;
++			} else if (done >= 0) {
++				done |= 1 << chid;
++			}
++		}
++		wr(stm.gpi, GPI_EV_DB, dma_pa(off));   /* give the slot back */
++		stm.ev_rp = (stm.ev_rp + 1) % EV_EL;
++		wr(stm.gpi, GPI_IEOB_CLR, 1);
++	}
++	return done;
++}
++
++/* one full-duplex transfer, CS (GPIO 47) held low around it */
++static int
++spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
++{
++	if (stm.dead || n == 0 || n > XFER_MAX) {
++		return EIO;
++	}
++	memcpy(dma_va(DMA_TX), tx, n);
++	memset(dma_va(DMA_RX), 0xee, n);
++	dma_clean(DMA_TX, n);
++	dma_flush(DMA_RX, n);
++	cs(false);
++	delay(2);
++	ch_queue(1, dma_pa(DMA_RX), (uint32_t)((stm.dma_pa + DMA_RX) >> 32), n, TRE_DMA << 16);
++	ch_ring(1);
++	/* CONFIG0: 8-bit words, mode 0, TX/RX packing, DFS level 0 (XO 19.2 MHz) / 2 */
++	ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
++	ch_queue(0, 3u /* SPI_DUPLEX */, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
++	ch_queue(0, dma_pa(DMA_TX), (uint32_t)((stm.dma_pa + DMA_TX) >> 32), n, TRE_DMA << 16 | TF_IEOT);
++	ch_ring(0);
++	int done = 0;
++	unsigned rx_wait = 0;
++	for (unsigned i = 0; i < 100000; i++) {
++		int d = gpi_events();
++		if (d < 0) {
++			done = d;
++			break;
++		}
++		done |= d;
++		if (done == 3 || ((done & 1) && ++rx_wait > 200)) {
++			break;                          /* RX has no IEOT: give its event 200 us */
++		}
++		delay(1);
++	}
++	delay(2);
++	cs(true);
++	dma_flush(DMA_RX, n);
++	memcpy(rx, dma_va(DMA_RX), n);
++	if (done < 0 || !(done & 1)) {
++		if (ch_state(0) == 0xf || ch_state(1) == 0xf) {
++			printf("SWEET STM: GPI channels in error (%u/%u); stopping\n", ch_state(0), ch_state(1));
++			stm.dead = true;
++		}
++		return EIO;
++	}
++	return 0;
++}
++
++/* ---- STM fts2ba61y (Samsung stm_spi.c framing) ---- */
++
++static uint8_t stm_tx[XFER_MAX], stm_rx[XFER_MAX];
++
++static int
++stm_write(const uint8_t *b, unsigned n)
++{
++	return spi_xfer(b, stm_rx, n);
++}
++
++/* one event: raw 87 + dummy, the 16 bytes from rx[2] */
++static int
++stm_read_event(uint8_t *ev)
++{
++	bzero(stm_tx, 2 + STM_EV_LEN);
++	stm_tx[0] = 0x87;
++	int error = spi_xfer(stm_tx, stm_rx, 2 + STM_EV_LEN);
++	memcpy(ev, stm_rx + 2, STM_EV_LEN);
++	return error;
++}
++
++static int
++stm_read_reg(uint8_t reg, uint8_t *out, unsigned n)
++{
++	const uint8_t pre[2] = { 0xc0, reg };
++	if (stm_write(pre, 2)) {
++		return EIO;
++	}
++	bzero(stm_tx, n + 4);
++	stm_tx[0] = 0xd1;
++	int error = spi_xfer(stm_tx, stm_rx, n + 4);
++	memcpy(out, stm_rx + 4, n);
++	return error;
++}
++
++/*
++ * Raw 0..4095 over the 1440x3088 panel -> the presented 1125x2436 display
++ * (SweetFramebuffer: sweetfb_fill scales by 1440/1125 and crops 15 rows top
++ * and bottom, else centres it 1:1) -> SweetHIDTouch's 1080x2400 input space
++ * (it adds (1125 - 1080) / 2, (2436 - 2400) / 2 and normalises by 1125x2436).
++ */
++static void
++stm_map(int rx, int ry, int *x, int *y)
++{
++	int64_t px = (int64_t)rx * 1440 / 4096, py = (int64_t)ry * 3088 / 4096, lx, ly;
++	if (stm.fill) {
++		lx = px * 1125 / 1440;
++		ly = (py + 15) * 1125 / 1440;
++	} else {
++		lx = px - (1440 - 1125) / 2;
++		ly = py - (3088 - 2436) / 2;
++	}
++	*x = (int)lx - (1125 - 1080) / 2;
++	*y = (int)ly - (2436 - 2400) / 2;
++}
++
++static void
++stm_release_all(void)
++{
++	for (int id = 0; id < STM_FINGERS; id++) {
++		if (stm.active & (1u << id)) {
++			sweet_hid_touch(id, 0, stm.x[id], stm.y[id]);
++		}
++	}
++	stm.active = 0;
++}
++
++static void
++stm_event(const uint8_t *e)
++{
++	unsigned eid = e[0] & 3;
++	if (eid == 0) {                         /* coordinate */
++		int id = (e[0] >> 2) & 0xf, act = e[0] >> 6, x, y;
++		if (id >= STM_FINGERS) {
++			return;
++		}
++		stm_map((int)e[1] << 4 | e[3] >> 4, (int)e[2] << 4 | (e[3] & 0xf), &x, &y);
++		if (act == 3) {                 /* release */
++			if (stm.active & (1u << id)) {
++				sweet_hid_touch(id, 0, stm.x[id], stm.y[id]);
++			}
++			stm.active &= ~(1u << id);
++		} else if (act == 1 || act == 2) {
++			sweet_hid_touch(id, 1, x, y);
++			stm.active |= 1u << id;
++			stm.x[id] = x;
++			stm.y[id] = y;
++		}
++	} else if (e[0] == 0xf3) {              /* STM_TS_EVENT_ERROR_REPORT */
++		printf("SWEET STM: IC error %02x %02x %02x %02x\n", e[1], e[2], e[3], e[4]);
++	}
++}
++
++static void
++stm_poll(void)
++{
++	uint8_t ev[STM_EV_LEN];
++	if (stm_read_event(ev)) {
++		if (++stm.errors == 10) {
++			stm_release_all();
++		}
++		return;
++	}
++	stm.errors = 0;
++	if (ev[0] == 0) {
++		return;
++	}
++	stm_event(ev);
++	for (unsigned left = ev[7] & 0x1f, i = 0; left && i < 31; i++) {
++		if (stm_read_event(ev) || ev[0] == 0) {
++			break;
++		}
++		stm_event(ev);
++		left = ev[7] & 0x1f;
++	}
++}
++
++static bool
++stm_hw_init(void)
++{
++	wr(stm.gcc, GCC_VOTE, rd(stm.gcc, GCC_VOTE) | (0xfu << 18) | (1u << 26));
++	for (unsigned i = 0; i < 20000 && (rd(stm.gcc, GCC_S4_CBCR) >> 31); i++) {
++		delay(1);
++	}
++	uint32_t fw = rd(stm.se, SE_FW);
++	printf("SWEET STM: SE4 fw %#x ifdis %u s4cbcr %#x\n", fw, rd(stm.se, SE_IFDIS) & 1,
++	    rd(stm.gcc, GCC_S4_CBCR));
++	if (((fw >> 8) & 0xff) != 1) {
++		printf("SWEET STM: SE4 protocol is not SPI; stopping\n");
++		return false;
++	}
++	gpio_cfg(44, 1, 2, false, false);       /* qup1_se4_l0 MISO, 6 mA */
++	gpio_cfg(45, 1, 2, false, false);       /* l1 MOSI */
++	gpio_cfg(46, 1, 2, false, false);       /* l2 CLK */
++	gpio_cfg(PIN_CS, 0, 2, true, true);     /* CS as GPIO, idle high (sec,gpio_spi_cs) */
++	gpio_cfg(PIN_IRQ, 0, 0, false, false);
++	if (!stm_power()) {
++		return false;
++	}
++	/* geni_se_io_init + irq clear + geni_se_select_gpi_mode */
++	wr(stm.se, SE_CGC_CTRL, rd(stm.se, SE_CGC_CTRL) | 0x7fu);
++	wr(stm.se, SE_DMA_GEN_CFG, rd(stm.se, SE_DMA_GEN_CFG) | 0xfu);
++	wr(stm.se, SE_OUTPUT_CTRL, 0x7fu);
++	wr(stm.se, SE_FORCE_DEF, 1u);
++	wr(stm.se, SE_GSI_EV_EN, 0);
++	wr(stm.se, SE_M_IRQ_CLR, 0xffffffffu);
++	wr(stm.se, SE_S_IRQ_CLR, 0xffffffffu);
++	wr(stm.se, SE_IRQ_EN, 0);
++	wr(stm.se, SE_M_IRQ_EN, rd(stm.se, SE_M_IRQ_EN) & ~(1u | (1u << 26) | (1u << 27) | (1u << 30)));
++	wr(stm.se, SE_DMA_MODE, 1);
++	wr(stm.se, SE_GSI_EV_EN, rd(stm.se, SE_GSI_EV_EN) | 0xfu);
++	wr(stm.se, SE_SPI_CPHA, 0);
++	wr(stm.se, SE_SPI_CPOL, 0);
++	wr(stm.se, SE_SPI_DEMUX, 0);
++	wr(stm.se, SE_SPI_TRANS, 0);
++	wr(stm.se, SE_SPI_WORDLEN, 8 - 4);
++	wr(stm.se, SE_TX_PACK0, SE_PACK0);
++	wr(stm.se, SE_TX_PACK1, SE_PACK1);
++	wr(stm.se, SE_RX_PACK0, SE_PACK0);
++	wr(stm.se, SE_RX_PACK1, SE_PACK1);
++	wr(stm.se, SE_CLK_SEL, 0);              /* DFS level 0 = XO (preset by the bootloader) */
++	if (!smmu_route_like(0xb6, 0x60) || !smmu_route_like(0xa3, 0x60)) {
++		printf("SWEET STM: SMMU stream setup failed; stopping (a DMA fault would reboot)\n");
++		return false;
++	}
++	uint32_t rc = gpi_init();
++	printf("SWEET STM: GPI init %#x (ch %u/%u ev %u)\n", rc, ch_state(0), ch_state(1), ev_state());
++	return rc == 0;
++}
++
++static bool
++stm_ic_init(void)
++{
++	static const uint8_t rst[6] = { 0xfa, 0x20, 0x00, 0x00, 0x24, 0x81 };
++	static const uint8_t scan[3] = { 0xa0, 0x00, 0x01 };    /* STM_TS_SCAN_MODE_DEFAULT */
++	uint8_t ev[STM_EV_LEN], id[8] = {0}, ver[8] = {0};
++	bool ready = false;
++	if (stm_write(rst, sizeof(rst))) {
++		return false;
++	}
++	stm_sleep(30);
++	for (unsigned tries = 0; tries < 60 && !ready && !stm.dead; tries++) {
++		ready = !stm_read_event(ev) && (ev[0] & 3) == 1 && ((ev[0] >> 2) & 0xf) == 2 && ev[1] == 0;
++		if (!ready) {
++			stm_sleep(20);
++		}
++	}
++	(void)stm_read_reg(0x22, id, 5);        /* STM_TS_READ_DEVICE_ID */
++	(void)stm_read_reg(0x24, ver, 8);       /* STM_TS_READ_FW_VERSION */
++	printf("SWEET STM: ready=%d id %02x%02x%02x%02x fw %02x%02x %02x%02x\n", ready,
++	    id[0], id[1], id[2], id[3], ver[0], ver[1], ver[2], ver[3]);
++	if (!ready && id[0] == 0 && id[1] == 0) {
++		return false;
++	}
++	return stm_write(scan, sizeof(scan)) == 0;
++}
++
++static void
++stm_thread(void *arg, wait_result_t result)
++{
++	unsigned delay_s = 45;
++	(void)arg;
++	(void)result;
++	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
++	int fill = 0;
++	stm.fill = PE_parse_boot_argn("sweetfb_fill", &fill, sizeof(fill)) && fill != 0;
++	printf("SWEET STM: starting in %u s (fill %d)\n", delay_s, stm.fill);
++	stm_sleep(delay_s * 1000u);
++	stm.gcc = ml_io_map(STM_GCC_PA, 0x60000);
++	stm.tlmm = ml_io_map(STM_TLMM_PA, 0x30000);
++	stm.se = ml_io_map(STM_SE_PA, 0x4000);
++	stm.gpi = ml_io_map(STM_GPI_PA, 0x8000);
++	stm.smmu = ml_io_map(STM_SMMU_PA, 0x1000);
++	if (!stm.gcc || !stm.tlmm || !stm.se || !stm.gpi || !stm.smmu) {
++		printf("SWEET STM: MMIO mapping failed\n");
++		goto out;
++	}
++	if (kmem_alloc_contig(kernel_map, &stm.dma, DMA_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET STM: no contiguous DMA memory\n");
++		goto out;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)stm.dma);
++	if (!pn) {
++		goto out;
++	}
++	stm.dma_pa = ptoa_64(pn);
++	if (!stm_hw_init() || !stm_ic_init()) {
++		printf("SWEET STM: init failed; stopping\n");
++		goto out;
++	}
++	printf("SWEET STM: scanning, polling every 8 ms\n");
++	while (!stm.dead) {
++		stm_poll();
++		stm_sleep(8);
++	}
++	stm_release_all();
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_stm_start(void)
++{
++	thread_t thread;
++	if (stm.started) {
++		return;
++	}
++	stm.started = true;
++	kern_return_t kr = kernel_thread_start(stm_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET STM: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff -ruN a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+--- a/bsd/dev/sweet_touch.c	2026-10-21 02:21:08
++++ b/bsd/dev/sweet_touch.c	2026-10-21 02:21:08
+@@ -21,6 +21,7 @@
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ void sweet_touch_init(void);
++extern void sweet_stm_start(void);	/* DM3Q STM over GPI SPI (sweet_stm.c) */
+ 
+ #define TOUCH_SE_PA      0x00a84000u
+ #define TOUCH_GCC_PA     0x00100000u
+@@ -648,6 +649,10 @@
+ 	(void)PE_parse_boot_argn("sweettouchirq", &st.irq_hint, sizeof(st.irq_hint));
+ 	if (!enabled) {
+ 		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
++		return;
++	}
++	if (enabled == 2) {
++		sweet_stm_start();
+ 		return;
+ 	}
+ 	kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);

@@ -847,3 +847,10 @@ void touch_probe(void)
 	con_set_row(line + 21);
 	con_hex2("TOUCH", "events=", (uint32_t)n, "", 0);
 }
+
+/* payload path: votes xnu has no client for, and power the IC early (it boots in ~100 ms) */
+void touch_preboot(void)
+{
+	qup_core_vote();
+	touch_power();
+}
