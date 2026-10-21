@@ -321,6 +321,14 @@
   **Mac IP is now persistent (no sudo):** `networksetup -setmanual "Sweet iOS (USB Ethernet)" 192.168.7.1
   255.255.255.0` (done 2026-10-21) - macOS applies it whenever the phone enumerates; the UDP receiver alone
   (no sudo) is enough: `python3 -u` loop on udp/5140 appending to ~/s23-log.txt.
+  **🎉 2026-10-21 14:08: SWEETMETAL OK ON THE S23 + sweetrun works (root test4 signed + boot x20s).** USB
+  enumerated on its own after the flash (no replug), Mac IP auto-applied, sweetrun answered on 5141.
+  First remote run: `FAIL device: the Vulkan loader did not open from any of libvulkan.so.1` (runtime's
+  non-macOS default). Fix: sm_device_create sets `options.loader` = SWEETMETAL_VULKAN or, on iOS,
+  /usr/lib/libvulkan.dylib (our mini-loader). Rebuilt + signed + `tools/sweetrun.py -f
+  third_party/sweettest-ios/sm_smoke sm_smoke` (25 s incl. 28 MB upload): `device: llvmpipe (LLVM 23.1.4,
+  128 bits)`, `1024/1024 correct`, `SWEETMETAL OK`. Userland iteration no longer needs any flash.
+  NEXT: sweetmetal textures/blit/render/IOSurface; a sweetrun tool that dumps the kernel SWEETLOG ring.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner

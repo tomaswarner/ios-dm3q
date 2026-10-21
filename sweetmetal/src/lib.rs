@@ -92,6 +92,7 @@ pub extern "C" fn sm_device_create() -> *mut Device {
     options.metal_level = Some(MetalLevel::NEWEST);
     options.shader_cache.directory = shader_cache_dir();
     options.shader_cache.capacity = 2 << 30;
+    options.loader = vulkan_loader();
     boxed(Device::system_default_with(&options))
 }
 
@@ -112,6 +113,16 @@ fn shader_cache_dir() -> Option<std::path::PathBuf> {
 
 extern "C" {
     fn getuid() -> u32;
+}
+
+/// The Vulkan loader: `SWEETMETAL_VULKAN`, else on iOS (no Khronos loader) our mini-loader
+/// `/usr/lib/libvulkan.dylib` (tools/sweettest/libvulkan_shim.c, forwards to lavapipe), else the
+/// runtime's platform defaults.
+fn vulkan_loader() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("SWEETMETAL_VULKAN").filter(|v| !v.is_empty()) {
+        return Some(path.into());
+    }
+    cfg!(target_os = "ios").then(|| "/usr/lib/libvulkan.dylib".into())
 }
 
 /// The device name (`-[MTLDevice name]`), copied into `buf` (NUL-terminated, truncated).
