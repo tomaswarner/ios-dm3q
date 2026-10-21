@@ -30,6 +30,13 @@
   CAP 0x3587031F, 64AS), ABL's UTRLBA 0xC70E6000; with our list at 0xA8015000 every command (TUR, CAP,
   READ) timed out (rc=1, doorbell never cleared): likely the SMMU (UFS SID 0x60) blocks our DMA. To try:
   reuse ABL's UTRL area / read apps_smmu S2CR for SID 0x60.
+- **Boot x2 (2026-10-20, IMG_5712/5713): XNU RUNS on DM3Q.** Embedded payload found; kernel console on the
+  0xb8000000 framebuffer (wraps to the top!): AppleCLCD 1440x3088, CPU0 EL1 SGI1 OK, VM/zones, IOKit,
+  platform expert, AKS/WDT/SURF/HID/battery, bsd_init (Copyright, MAC, buffer headers). Then nothing for
+  minutes (no panic): stalls before `mbinit: done`, where sweet next had the ~30 s IORTC timed wait.
+  Hypothesis: the virtual timer interrupt (INTID 27) is not delivered/handled under Gunyah (SGIs are).
+  Test image `shim/out/dm3q-gic1-boot.img` (no payload): PSCI, `test_gic` (VTIMER 27 / PTIMER 30 / SGI1
+  irq counts), then the UFS probe, then holds.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

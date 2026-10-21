@@ -381,14 +381,23 @@ void shim_main(uint64_t dtb)
 	con_str("LOADER", why);
 	con_skip();
 
-	/* No payload: probe the internal UFS while the MMU is still off. */
+	/*
+	 * No payload. DM3Q: xnu 0x2 stalls in bsd_init's timed waits, so first
+	 * check timer/SGI interrupt delivery through Gunyah's vGIC, then probe
+	 * the internal UFS while the MMU is still off.
+	 */
+	stage = "psci";
+	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
+	con_skip();
+	test_gic();
+	con_skip();
 	stage = "ufs";
 	test_ufs();
 	con_skip();
-	/* Keep the probe results on screen (later tests clear it); reset after 3 min. */
-	con_str("UFS", "probe done, reset in ~3 min");
-	delay_ms(180000);
-	reset(20);
+	/* Keep the results on screen; no reset (the photo is the output). */
+	con_str("DONE", "hold; photograph this screen");
+	for (;;)
+		__asm__ volatile("wfe");
 
 	stage = "fill off";
 	uint64_t fill_off = ticks_fill(RED);
