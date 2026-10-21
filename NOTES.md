@@ -158,6 +158,10 @@
   ("not in trust cache" warnings), `Darwin Bootstrapper Version 7.0.0`, launchd ondemand, boot tasks: fsck
   skipped, mount-phase-1: `mount_hfs: Read-only file system`, `mount: / failed with 1`, BindFS preboot firmware
   lookup error 2, `panic: mount[3] exited` (as sweet before rootrw). x6 = same + `ufsrw=1 rootrw=1`.
+- **Log viewer (no recovery needed):** `shim/out/dm3q-logview-boot.img` (no payload): UFS bring-up, finds
+  userdata in the GPT, reads the 0047 SWEETLOG header at the last 1025 blocks, renders the last ~190 lines
+  of the console stream full-screen in the 8x16 font (180 cols) + footer total/seq. Workflow: boot iOS
+  image (ufsrw=1 so the log is flushed every 10 s), Download Mode, flash logview to BOOT, one photo, flash back.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

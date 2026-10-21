@@ -14,6 +14,7 @@
 #include "ufs.h"
 #include "rpmh.h"
 #include "ufsphy.h"
+#include "font.h"
 
 #define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
 
@@ -935,4 +936,136 @@ static void ufs_pick_gear(void)
 		ufs_wr(REG_IS, IS_UPMS);
 	}
 	con_hex2("GEAR", "best HS=", best, "(0 = PWM-G1)", 0);
+}
+
+/* ---- DM3Q: show xnu's persistent console log (patch 0047) from userdata ----
+ * Layout: last SWEET_LOG_BLOCKS (1 + 4 MiB / 4 KiB) blocks of the partition;
+ * block 0 = header "SWEETLOG" u32 version, u32 ring size, u64 total, u64 seq;
+ * byte n of the console stream lives at ring offset n % size. */
+
+#define LOG_BLOCKS	(1 + (4u << 20) / BLOCK)
+#define TAIL_BYTES	(64u << 10)
+#define TXT_COLS	(FB_W / 8)
+#define TXT_ROWS	((FB_H - 16) / 16)
+
+static uint8_t logbuf[TAIL_BYTES + BLOCK] __attribute__((aligned(4096)));
+
+static void small_char(int col, int row, char ch, uint32_t fg)
+{
+	if (ch < 0x20 || ch > 0x7e)
+		ch = '?';
+	const unsigned char *g = font8x16[ch - 0x20];
+	for (int gy = 0; gy < 16; gy++) {
+		volatile uint32_t *p = con_fb + (row * 16 + gy) * (FB_STRIDE / 4) + col * 8;
+		for (int gx = 0; gx < 8; gx++)
+			p[gx] = (g[gy] & (0x80 >> gx)) ? fg : 0xff000000u;
+	}
+}
+
+static int find_userdata(uint32_t *first, uint32_t *count)
+{
+	static uint8_t ents[128 * 128] __attribute__((aligned(4096)));
+	if (read_blocks(1, 1, data))			/* GPT header (4 KiB LBA 1) */
+		return -1;
+	uint32_t nent = data[80] | data[81] << 8, elba = data[72] | data[73] << 8;
+	if (nent > 128 || read_blocks(elba, (nent * 128 + BLOCK - 1) / BLOCK, ents))
+		return -2;
+	for (uint32_t i = 0; i < nent; i++) {
+		const uint8_t *e = ents + i * 128;
+		const char want[] = { 'u', 0, 's', 0, 'e', 0, 'r', 0, 'd', 0, 'a', 0, 't', 0, 'a', 0, 0, 0 };
+		int k = 0;
+		while (k < 18 && e[56 + k] == (uint8_t)want[k])
+			k++;
+		if (k == 18) {
+			uint64_t f = le64(e + 32), l = le64(e + 40);
+			*first = (uint32_t)f;
+			*count = (uint32_t)(l - f + 1);
+			return 0;
+		}
+	}
+	return -3;
+}
+
+void ufs_logview(void)
+{
+	stage_str("logview");
+	uint32_t first = 0, count = 0;
+	int rc = find_userdata(&first, &count);
+	con_hex2("LOGVIEW", "userdata=", first, "rc=", (uint32_t)rc);
+	if (rc)
+		return;
+	uint32_t base = first + count - LOG_BLOCKS;
+	if (read_blocks(base, 1, logbuf)) {
+		con_str("LOGVIEW", "header read error");
+		return;
+	}
+	const uint8_t *h = logbuf;
+	if (h[0] != 'S' || h[1] != 'W' || h[2] != 'E' || h[3] != 'E' || h[4] != 'T' || h[5] != 'L') {
+		con_hex2("LOGVIEW", "no SWEETLOG at=", base, "b0=", h[0] | h[1] << 8 | h[2] << 16 | h[3] << 24);
+		return;
+	}
+	uint32_t size = h[12] | h[13] << 8 | h[14] << 16 | (uint32_t)h[15] << 24;
+	uint64_t total = le64(h + 16), seq = le64(h + 24);
+	if (size != (4u << 20)) {
+		con_hex2("LOGVIEW", "odd ring size=", size, "", 0);
+		return;
+	}
+	/* tail: the last n bytes [total-n, total); read the blocks covering them (wrap-aware) */
+	uint32_t n = total < TAIL_BYTES ? (uint32_t)total : TAIL_BYTES;
+	uint64_t start = total - n;
+	char *txt = (char *)logbuf;
+	uint32_t got = 0;
+	while (got < n) {
+		uint32_t off = (uint32_t)((start + got) % size);
+		uint32_t blk = off / BLOCK, in = off % BLOCK;
+		uint32_t take = BLOCK - in;
+		if (take > n - got)
+			take = n - got;
+		static uint8_t one[BLOCK] __attribute__((aligned(4096)));
+		if (read_blocks(base + 1 + blk, 1, one))
+			break;
+		for (uint32_t i = 0; i < take; i++)
+			txt[got + i] = (char)one[in + i];
+		got += take;
+	}
+
+	/* lay out: wrap at TXT_COLS, keep the last TXT_ROWS-1 screen rows */
+	static uint32_t line_start[4096];
+	uint32_t nlines = 0, col = 0;
+	line_start[nlines++] = 0;
+	for (uint32_t i = 0; i < got && nlines < 4096; i++) {
+		if (txt[i] == '\n' || col == TXT_COLS) {
+			line_start[nlines++] = txt[i] == '\n' ? i + 1 : i;
+			col = txt[i] == '\n' ? 0 : 1;
+		} else
+			col++;
+	}
+	con_clear(0xff000000u);
+	uint32_t rows = TXT_ROWS - 1;
+	uint32_t from = nlines > rows ? nlines - rows : 0;
+	for (uint32_t r = 0; from + r < nlines; r++) {
+		uint32_t a = line_start[from + r];
+		uint32_t b = from + r + 1 < nlines ? line_start[from + r + 1] : got;
+		int c = 0;
+		for (uint32_t i = a; i < b && c < (int)TXT_COLS; i++)
+			if (txt[i] != '\n' && txt[i] != '\r')
+				small_char(c++, r, txt[i], 0xffffffffu);
+	}
+	/* footer: where this came from */
+	char foot[96];
+	const char hex[] = "0123456789abcdef";
+	const char *lbl = "SWEETLOG total=0x";
+	int k = 0;
+	for (const char *q = lbl; *q; q++)
+		foot[k++] = *q;
+	for (int i = 39; i >= 0; i -= 4)
+		foot[k++] = hex[(total >> i) & 0xf];
+	const char *l2 = " seq=0x";
+	for (const char *q = l2; *q; q++)
+		foot[k++] = *q;
+	for (int i = 23; i >= 0; i -= 4)
+		foot[k++] = hex[(seq >> i) & 0xf];
+	foot[k] = 0;
+	for (int i = 0; foot[i]; i++)
+		small_char(i, TXT_ROWS, foot[i], 0xffffff00u);
 }
