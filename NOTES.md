@@ -189,6 +189,13 @@
 - **Boot x9s (kernel out-dm3q-005 = 0100 v2 + 0101 + 0102 + 0103; cmdline cpus=8 sweetfb_fill=1
   sweetfb_noconsole=1, no -enable_kprintf_spam): user reports the Apple logo FULL SCREEN** -> SMP with 8
   cores boots (GICR stride fix) and the x32/25 scaling works. Fallback image dm3q-x9 (cpus=1).
+- **🎉🎉🎉 2026-10-21 ~01:00 local (IMG_5754): iOS 16.7 LOCK SCREEN, FULL SCREEN, ON THE GALAXY S23 ULTRA.**
+  Boot x9s (cpus=8, sweetfb_fill=1) reached the lock screen after ~10-15 min on the Apple logo (first boot):
+  date/time (Wednesday, December 31 4:15: no RTC driver), battery icon, camera button, home indicator.
+  No touch/keys yet (sweettouch=0 sweetkeys=0; sweet drivers are Goodix-I2C/SPMI-sweet).
+  Next: touch (STM FTS over GENI SPI @0xa90000, IRQ GPIO 25, S2DOS05 rails), keys (PMK8550 PON 0x1300
+  KPDPWR/RESIN, PM8550 GPIO6 vol+), RTC (PMK8550 RTC over SPMI), UFS HS-G2+ (PHY rate tables/adapt),
+  USB (DWC3 0xa600000 for the live log), battery.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
