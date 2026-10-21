@@ -86,10 +86,17 @@ int mmu_enable(struct mmu_info *info)
 	if (((img_hi - 1) >> BLK_SHIFT) - (img_lo >> BLK_SHIFT) > 1)
 		return -1;	/* only room for two L3 tables */
 
-	/* L2: Device everywhere RAM or MMIO can be (first 8GB), rest unmapped */
+	/*
+	 * L2: Device everywhere RAM or MMIO can be, rest unmapped. DM3Q (SM8550):
+	 * MMIO + low DRAM bank below 4GB, upper DRAM bank from 0x8_80000000
+	 * (8GB phone: up to ~0xa_00000000) -> map 0-4GB and 32-64GB.
+	 */
 	zero_table(l2);
-	for (uint64_t i = 0; i < (8UL << 30) >> BLK_SHIFT; i++)
-		l2[i] = (i << BLK_SHIFT) | DEV_FLAGS | D_BLOCK;
+	for (uint64_t i = 0; i < NENT; i++) {
+		uint64_t pa = i << BLK_SHIFT;
+		if (pa < (4UL << 30) || pa >= (32UL << 30))
+			l2[i] = pa | DEV_FLAGS | D_BLOCK;
+	}
 	l2[FB_PHYS >> BLK_SHIFT] = (FB_PHYS & ~(BLK_SIZE - 1)) | NC_FLAGS | D_BLOCK;
 
 	/* L3 for each block that holds part of the image */

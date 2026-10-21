@@ -85,9 +85,26 @@ const char *loader_boot(uintptr_t dtb)
 		return "no initrd in /chosen";
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
-	const struct payload *p = (const struct payload *)rd_start;
-	if (!magic_ok(p->magic))
+	/*
+	 * Boot header v4 (DM3Q): ABL concatenates the vendor_boot ramdisk and
+	 * ours, so the payload sits behind Samsung's vendor ramdisk. build.sh
+	 * pads ours so it lands 8-byte aligned; scan for it in 8-byte steps.
+	 */
+	uintptr_t at = rd_start;
+	while (at + sizeof(struct payload) <= rd_end && !magic_ok((const char *)at))
+		at += 8;
+	if (at + sizeof(struct payload) > rd_end) {
+		for (at = rd_start; at + 8 <= rd_end && !magic_ok((const char *)at); at++)
+			;
+		if (at + 8 <= rd_end) {
+			con_hex2("PAYLOAD", "off=", at - rd_start, "mod8=", at & 7);
+			return "SWEETXNU payload not 8-byte aligned (vendor ramdisk pad?)";
+		}
 		return "no SWEETXNU payload";
+	}
+	con_hex2("PAYLOAD", "off=", at - rd_start, 0, 0);
+	rd_start = at;
+	const struct payload *p = (const struct payload *)rd_start;
 	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
 		return "bad payload header";
 
