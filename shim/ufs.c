@@ -13,6 +13,7 @@
 #include "console.h"
 #include "ufs.h"
 #include "rpmh.h"
+#include "ufsphy.h"
 
 #define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
 
@@ -668,6 +669,22 @@ static void ufs_bringup_device(void)
 
 #define TCSR_UFS_CLKREF_EN	0x01fd5110UL	/* tcsr 0x1fc0000 + 0x15110 (tcsrcc-sm8550), bit 0 */
 
+/* sm8550-samsung-q5q.dts / phone DT: VCC l17b 2.504 V, VCCQ l1g 1.2 V, HBA l3g 1.2 V,
+ * PHY vdda l1d 0.88 V, PLL l3e 1.2 V, qref l1e 0.88 V */
+static void ufs_vote_rails(void)
+{
+	stage_str("rpmh votes");
+	rpmh_version();
+	uint32_t v0 = (uint32_t)rpmh_vreg_on("ldob17", 2504, PMIC5_LDO_MODE_HPM);
+	uint32_t v1 = (uint32_t)rpmh_vreg_on("ldog1", 1200, PMIC5_LDO_MODE_HPM);
+	uint32_t v2 = (uint32_t)rpmh_vreg_on("ldog3", 1200, 0);
+	uint32_t v3 = (uint32_t)rpmh_vreg_on("ldod1", 880, PMIC5_LDO_MODE_HPM);
+	uint32_t v4 = (uint32_t)rpmh_vreg_on("ldoe3", 1200, 0);
+	uint32_t v5 = (uint32_t)rpmh_vreg_on("ldoe1", 880, 0);
+	con_hex2("VOTE", "vcc/vccq=", v0 | v1, "hba/phy=", v2 | v3);
+	con_hex2("VOTE", "pll/qref=", v4 | v5, 0, 0);
+}
+
 void test_ufs_power(void)
 {
 	utrl = utrl_own;
@@ -686,7 +703,9 @@ void test_ufs_power(void)
 
 	/* sm8550-samsung-q5q.dts / phone DT: VCC l17b 2.504 V, VCCQ l1g 1.2 V, HBA l3g 1.2 V,
 	 * PHY vdda l1d 0.88 V, PLL l3e 1.2 V, qref l1e 0.88 V */
-	stage_str("rpmh votes");
+	ufs_vote_rails();
+	(void)0;
+	if (0) {
 	uint32_t v0 = (uint32_t)rpmh_vreg_on("ldob17", 2504, PMIC5_LDO_MODE_HPM);
 	uint32_t v1 = (uint32_t)rpmh_vreg_on("ldog1", 1200, PMIC5_LDO_MODE_HPM);
 	uint32_t v2 = (uint32_t)rpmh_vreg_on("ldog3", 1200, 0);
@@ -696,6 +715,7 @@ void test_ufs_power(void)
 	con_hex2("VOTE", "vcc=", v0, "vccq=", v1);
 	con_hex2("VOTE", "hba=", v2, "phy=", v3);
 	con_hex2("VOTE", "pll=", v4, "qref=", v5);
+	}
 
 	stage_str("tcsr clkref");
 	uint32_t ref = mmio_rd(TCSR_UFS_CLKREF_EN);
@@ -714,4 +734,98 @@ void test_ufs_power(void)
 	}
 	/* otherwise host reset + link startup (ABL's PHY setup may not survive) */
 	test_ufs_wake();
+}
+
+/* ---- DM3Q: full UFS bring-up in U-Boot's order (ufs-qcom + qmp-ufs + ufs-uclass) ---- */
+
+#define TLMM_UFS_RESET_IO	0x0f1de004UL	/* tlmm 0xf100000 + UFS_RESET 0xde000 + 4 (out bit 0, active low) */
+#define GCC_UFS_PHY_BCR		0x00177000UL	/* gcc 0x100000 + 0x77000 (clock-sm8550 resets) */
+#define REG_UFS_CFG0		0xd8		/* QUNIPRO_G4_SEL bit 5 */
+#define REG_UFS_CFG1		0xdc		/* QUNIPRO_SEL bit 0 */
+#define REG_UFS_HW_VERSION	0xe4		/* major [31:28] */
+
+static uint32_t dme_set(uint32_t attr, uint32_t val)
+{
+	return uic(0x02, attr << 16, val, 0);	/* DME_SET, ARG3 = value */
+}
+
+static uint32_t dme_get_val(uint32_t attr, uint32_t *val)
+{
+	return uic(0x01, attr << 16, 0, val);
+}
+
+void test_ufs_linux(void)
+{
+	utrl = utrl_own;
+	ucdp = &ucd_own;
+	con_str("UFS", "dm3q full bring-up (U-Boot order)");
+	ufs_vote_rails();
+
+	/* ufs_qcom_device_reset: RST_n low >= 1 us */
+	stage_str("ufs device reset");
+	uint32_t io = mmio_rd(TLMM_UFS_RESET_IO);
+	mmio_wr(TLMM_UFS_RESET_IO, 0);
+	udelay(10);
+	mmio_wr(TLMM_UFS_RESET_IO, 1);
+	udelay(10);
+	con_hex2("RST_N", "was=", io, "now=", mmio_rd(TLMM_UFS_RESET_IO));
+
+	/* ufshcd_hba_enable: stop, then hce_enable_notify(PRE) = power_up_sequence */
+	stage_str("ufs hba stop");
+	ufs_wr(REG_HCE, 0);
+	uint64_t t0 = ticks();
+	while ((ufs_rd(REG_HCE) & 1) && ticks() - t0 < 1920000)
+		;
+	stage_str("ufs core reset");
+	mmio_wr(GCC_UFS_PHY_BCR, 1);		/* ufs_qcom_reset: assert, >= 125 us */
+	udelay(210);
+	mmio_wr(GCC_UFS_PHY_BCR, 0);
+	udelay(1100);
+
+	stage_str("ufs phy");
+	uint32_t phy = ufsphy_power_on();
+	uint32_t hwv = ufs_rd(REG_UFS_HW_VERSION);
+	con_hex2("PHY", "rc=", phy, "hwver=", hwv);
+	ufs_wr(REG_UFS_CFG1, ufs_rd(REG_UFS_CFG1) | 1);			/* QUNIPRO_SEL */
+	if ((hwv >> 28) >= 5)
+		ufs_wr(REG_UFS_CFG0, ufs_rd(REG_UFS_CFG0) & ~(1u << 5));	/* QUNIPRO_G4_SEL off */
+
+	/* ufshcd_hba_start + wait for HCE */
+	stage_str("ufs hce");
+	ufs_wr(REG_HCE, 1);
+	udelay(1000);
+	t0 = ticks();
+	while (!(ufs_rd(REG_HCE) & 1) && ticks() - t0 < 19200000)
+		;
+	uint32_t fsm = 0xff;
+	for (int i = 0; i < 50; i++) {			/* POST_CHANGE: TX FSM must reach HIBERN8 (1) */
+		if (!dme_get_val(0x41, &fsm) && fsm == 1)
+			break;
+		udelay(200);
+	}
+	con_hex2("HCE", "hce=", ufs_rd(REG_HCE), "txfsm=", fsm);
+
+	/* link_startup_notify(PRE): unipro core clk 300 MHz -> 1 us = 300, 40 ns = 12; LCC off */
+	stage_str("ufs clk ctrl");
+	uint32_t cc = 0, c40 = 0;
+	uint32_t e1 = dme_get_val(0xd002, &cc);			/* DME_VS_CORE_CLK_CTRL */
+	cc = (cc & ~(0xfffu << 16) & ~(1u << 8)) | (300u << 16);
+	uint32_t e2 = dme_set(0xd002, cc);
+	uint32_t e3 = dme_get_val(0x9007, &c40);		/* PA_VS_CORE_CLK_40NS_CYCLES */
+	uint32_t e4 = dme_set(0x9007, (c40 & ~0x7fu) | 12);
+	uint32_t e5 = dme_set(0x155e, 0);			/* PA_LOCAL_TX_LCC_ENABLE */
+	con_hex2("CLKCTL", "cc=", cc, "err=", e1 | e2 << 4 | e3 << 8 | e4 << 12 | e5 << 16);
+
+	stage_str("ufs linkstartup");
+	uint32_t rc = 0xff;
+	for (int i = 0; i < 4 && rc; i++)
+		rc = uic(0x16, 0, 0, 0);
+	con_hex2("LINKUP", "rc=", rc, "hcs=", ufs_rd(REG_HCS));
+	con_hex2("LINKUP", "is=", ufs_rd(REG_IS), "uecpa=", ufs_rd(REG_UECPA));
+	if (rc || !(ufs_rd(REG_HCS) & HCS_DP)) {
+		con_str("UFS", "link startup failed / no device");
+		return;
+	}
+	ufs_wr(REG_IS, ufs_rd(REG_IS));
+	ufs_bringup_device();
 }

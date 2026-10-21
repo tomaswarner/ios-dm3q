@@ -108,6 +108,15 @@
   HPM 7), enable @+4. Probe `shim/out/dm3q-pwr1-boot.img` (test_ufs_power): cmd-db addrs of ldob17/ldog1/
   ldog3/ldod1/ldoe3/ldoe1, votes 2504/1200/1200/880/1200/880 mV, TCSR UFS_CLKREF_EN (0x1fd5110 bit 0) on,
   then H8 exit + DME_PEER_GET; if the peer answers -> NOP/SSU/fDeviceInit/TUR/GPT, else HCE + link startup.
+- **pwr1 result (IMG_5731):** RPMh works: RSC ver 0x30000, TCS0 idle, cmd-db ldob17 0x42700, ldog1 0x42000,
+  ldog3 0x42100, ldod1 0x42E00, ldoe3 0x43B00, ldoe1 0x43A00; all 6 votes completed (rc 0). TCSR
+  UFS_CLKREF_EN already 1. H8 exit rc 0 / IS 0, peer still DME_FAILURE; HCE + link startup fails as before.
+  **ufs5 SoC reset explained:** TLMM pin registers start at 0xF100000 (mainline `tlmm: pinctrl@f100000`;
+  Samsung pinctrl-kalama.c REG_BASE 0x100000, UFS_RESET 0x1DE000). UFS_RESET io = **0xF1DE004**, not
+  0xF0DE004. Samsung S23 kernel source: github.com/mrslezak/S23_Kernel (kernel_platform/msm-kernel).
+  Probe `shim/out/dm3q-ufs7-boot.img` (test_ufs_linux, U-Boot order): votes, RST_n pulse (0xF1DE004),
+  HCE 0, GCC_UFS_PHY_BCR 0x177000 pulse, **QMP PHY sm8550 tables** (`shim/ufsphy.c`), QUNIPRO_SEL, HCE 1,
+  TX FSM == H8, DME_VS_CORE_CLK_CTRL 1 us = 300, 40 ns = 12, LCC off, link startup, NOP/SSU/fDeviceInit/GPT.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

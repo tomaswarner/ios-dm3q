@@ -415,7 +415,7 @@ void shim_main(uint64_t dtb)
 	con_skip();
 	/* test_gic(): done (dm3q gic3: VTIMER 30/300 ms, SGI 10/10); keep the screen for UFS */
 	stage = "ufs";
-	test_ufs_power();	/* dm3q: ABL powers UFS down at exit; re-vote rails via RPMh */
+	test_ufs_linux();	/* dm3q: ABL powers UFS down at exit; full re-init like U-Boot */
 	con_skip();
 	/* Keep the results on screen; no reset (the photo is the output). */
 	con_str("DONE", "hold; photograph this screen");
