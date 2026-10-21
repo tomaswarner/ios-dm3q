@@ -15,6 +15,10 @@ trap 'hdiutil detach "$dev" >/dev/null 2>&1 || true' EXIT
 mkdir -p "$mnt/usr/local/sweettest"
 cp "$dir"/* "$mnt/usr/local/sweettest/"
 chmod 755 "$mnt/usr/local/sweettest"/*
+if [ -e "$dir/libvulkan.dylib" ]; then        # mini-loader for ash's dlopen("libvulkan.dylib")
+	mv "$mnt/usr/local/sweettest/libvulkan.dylib" "$mnt/usr/lib/libvulkan.dylib"
+	chmod 755 "$mnt/usr/lib/libvulkan.dylib"
+fi
 python3 - "$mnt/System/Library/xpc/launchd.plist" <<'EOF'
 import plistlib, sys
 path = sys.argv[1]
