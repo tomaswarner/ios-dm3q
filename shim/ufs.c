@@ -617,7 +617,9 @@ void test_ufs_wake(void)
 	ufs_bringup_device();
 }
 
-/* Link is up: our list, NOP OUT, SSU Active, fDeviceInit, TUR, capacity, GPT (read-only). */
+static void ufs_power_hs(uint32_t gear);
+
+/* Link is up: our list, NOP OUT, SSU Active, fDeviceInit, HS gear, TUR, capacity, GPT (read-only). */
 static void ufs_bringup_device(void)
 {
 	uint32_t rc;
@@ -654,6 +656,9 @@ static void ufs_bringup_device(void)
 		val = query_flag(0x01, 0x05, 0x01);	/* READ_FLAG fDeviceInit */
 	}
 	con_hex2("FDEVINIT", "set=", set, "now=", val << 8 | tries);
+
+	/* link_startup leaves PWM-G1 (< 1 MB/s): switch to HS-G4 rate B x2 like U-Boot/Linux */
+	ufs_power_hs(4);
 
 	/* 6. SCSI on LUN 0: TUR (unit attention first), capacity, GPT */
 	stage_str("ufs scsi");
@@ -863,4 +868,35 @@ void test_ufs_linux(void)
 	}
 	ufs_wr(REG_IS, ufs_rd(REG_IS));
 	ufs_bringup_device();
+}
+
+/* ufshcd_change_power_mode (U-Boot): HS gear, 2 lanes, termination, rate B, FAST/FAST */
+#define IS_UPMS		(1u << 4)
+
+static void ufs_power_hs(uint32_t gear)
+{
+	stage_str("ufs pwrmode");
+	uint32_t e = 0;
+	e |= dme_set(0x1583, gear);		/* PA_RXGEAR */
+	e |= dme_set(0x1580, 2);		/* PA_ACTIVERXDATALANES */
+	e |= dme_set(0x1584, 1);		/* PA_RXTERMINATION */
+	e |= dme_set(0x1568, gear);		/* PA_TXGEAR */
+	e |= dme_set(0x1560, 2);		/* PA_ACTIVETXDATALANES */
+	e |= dme_set(0x1569, 1);		/* PA_TXTERMINATION */
+	e |= dme_set(0x156a, 2);		/* PA_HSSERIES = rate B */
+	if ((ufs_rd(REG_UFS_HW_VERSION) >> 28) >= 4 && gear > 3)
+		e |= dme_set(0x15d4, 1);	/* PA_TXHSADAPTTYPE = PA_INITIAL_ADAPT */
+	ufs_wr(REG_IS, IS_UPMS);
+	uint32_t rc = dme_set(0x1571, 0x11);	/* PA_PWRMODE: FAST rx << 4 | FAST tx */
+	uint64_t t0 = ticks();
+	while (!(ufs_rd(REG_IS) & IS_UPMS) && ticks() - t0 < 19200000)
+		;
+	uint32_t upmcrs = (ufs_rd(REG_HCS) >> 8) & 7;	/* PWR_LOCAL = 1 */
+	ufs_wr(REG_IS, IS_UPMS);
+	uint32_t pm = 0, tg = 0, rg = 0;
+	dme_get_val(0x1571, &pm);
+	dme_get_val(0x1568, &tg);
+	dme_get_val(0x1583, &rg);
+	con_hex2("HSGEAR", "rc/upmcrs=", rc << 8 | upmcrs, "set err=", e);
+	con_hex2("HSGEAR", "pwrmode=", pm, "tx/rx gear=", tg << 8 | rg);
 }
