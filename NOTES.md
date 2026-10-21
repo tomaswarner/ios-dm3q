@@ -205,6 +205,15 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Vulkan for the iOS Metal stack (2026-10-21):** metal2vulkan-runtime cross-compiles for aarch64-apple-ios
+  unchanged (IPHONEOS_DEPLOYMENT_TARGET=16.0). JIT: sweet's AMFI has no proc_check_map_anon hook, so every
+  process is jit_entitled; W+X only blocked via vm_map_cs_enforcement (off with cs_enforcement_disable=1) -
+  static analysis, untested. No prior iOS port of lavapipe/Turnip/SwiftShader exists; Mesa meson has darwin
+  branches and builds libvulkan_lvp.dylib on macOS (llvmpipe's os_jit_allowed must pass). Turnip KGSL ioctls
+  (tu_knl_kgsl.cc): DEVICE_GETPROPERTY, DRAWCTXT_CREATE/DESTROY, GPUMEM_ALLOC_ID/FREE_ID/GET_INFO/BIND_RANGES,
+  GPUOBJ_ALLOC/FREE/IMPORT/INFO, GPU_COMMAND, GPU_AUX_COMMAND, TIMESTAMP_EVENT, CMDSTREAM_READTIMESTAMP_CTXTID,
+  DEVICE_WAITTIMESTAMP_CTXTID, PERFCOUNTER_READ; plus /dev/dma_heap or ion (to stub) and sync_file fences.
+  Plan: lavapipe on macOS as host testbed -> LLVM (static AArch64) + Mesa cross file for iOS -> SweetMetal.bundle.
 - **metal2vulkan vs the real iOS 16 shaders (lavapipe profile, 2026-10-21):** `tools/metallib-ls.py` lists MTLB
   functions. QuartzCore default.metallib (39 vertex, 95 fragment, 7 kernel) and CoreImage default.metallib
   (58 kernels): 115/141 and 55/58 translate to SPIR-V; every other one only asks for runtime pipeline input
