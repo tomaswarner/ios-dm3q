@@ -413,8 +413,7 @@ void shim_main(uint64_t dtb)
 	stage = "psci";
 	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
 	con_skip();
-	test_gic();
-	con_skip();
+	/* test_gic(): done (dm3q gic3: VTIMER 30/300 ms, SGI 10/10); keep the screen for UFS */
 	stage = "ufs";
 	test_ufs_dm3q();
 	con_skip();

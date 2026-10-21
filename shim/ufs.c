@@ -381,6 +381,49 @@ static void smmu_probe(void)
 	con_hex2("SMMU", "nsmr=", nsmr, "ufs_smr=", found);
 }
 
+#define GCC_BASE	0x00100000UL	/* gcc: clock-controller@100000 (Linux gcc-sm8550.c offsets) */
+#define CBCR_CLK_OFF	(1u << 31)
+#define CBCR_CLK_EN	(1u << 0)
+
+static inline void mmio_wr(uintptr_t a, uint32_t v)
+{
+	__asm__ volatile("str %w0, [%1]" : : "r"(v), "r"(a) : "memory");
+}
+
+/* UFS clock branches and power domains; returns how many branches were off */
+static int ufs_clocks(const char *label)
+{
+	static const uint32_t off[] = { 0x77018, 0x77074, 0x77068, 0x77024, 0x770b0, 0x7702c, 0x770cc, 0x77028 };
+	uint32_t v[8];
+	int n_off = 0;
+	for (int i = 0; i < 8; i++) {
+		v[i] = mmio_rd(GCC_BASE + off[i]);
+		n_off += !!(v[i] & CBCR_CLK_OFF);
+	}
+	con_hex2(label, "axi=", v[0], "ice=", v[1]);
+	con_hex2(label, "unipro=", v[2], "ahb=", v[3]);
+	con_hex2(label, "aux=", v[4], "rx0=", v[5]);
+	con_hex2(label, "rx1=", v[6], "tx0=", v[7]);
+	con_hex2(label, "gdsc=", mmio_rd(GCC_BASE + 0x77004), "phygdsc=", mmio_rd(GCC_BASE + 0x9e000));
+	return n_off;
+}
+
+/* Turn on AXI (DMA master), ICE (inline crypto, in the data path), UniPro and PHY aux, as Linux does */
+static void ufs_clocks_on(void)
+{
+	static const uint32_t off[] = { 0x77018, 0x77074, 0x77068, 0x770b0 };
+	for (int i = 0; i < 4; i++) {
+		uintptr_t r = GCC_BASE + off[i];
+		uint32_t v = mmio_rd(r);
+		if (v & CBCR_CLK_OFF) {
+			mmio_wr(r, v | CBCR_CLK_EN);
+			uint64_t start = ticks();
+			while ((mmio_rd(r) & CBCR_CLK_OFF) && ticks() - start < 1920000)
+				;
+		}
+	}
+}
+
 void test_ufs_dm3q(void)
 {
 	con_str("UFS", "dm3q probe (read-only data)");
@@ -399,8 +442,17 @@ void test_ufs_dm3q(void)
 	dme_get("RXGEAR", 0x1583);	/* PA_RxGear */
 	dme_get("TXLANES", 0x1561);	/* PA_ConnectedTxDataLanes */
 
+	stage_str("gcc read");
+	int n_off = ufs_clocks("CLK");
 	stage_str("ufs own");
 	try_cmds("OWN", (uintptr_t)utrl_own, (uintptr_t)&ucd_own);
+	if (n_off) {
+		stage_str("gcc enable");
+		ufs_clocks_on();
+		ufs_clocks("CLK2");
+		stage_str("ufs clk");
+		try_cmds("CLKON", (uintptr_t)utrl_own, (uintptr_t)&ucd_own);
+	}
 	/* DME_HIBERNATE_EXIT: harmless if the link is not in Hibern8 (error result) */
 	uint32_t h8 = uic(0x18, 0, 0, 0);
 	con_hex2("H8EXIT", "rc=", h8, "hcs=", ufs_rd(REG_HCS));
@@ -410,6 +462,6 @@ void test_ufs_dm3q(void)
 		stage_str("ufs abl");
 		try_cmds("ABL", abl & ~0xfffUL, (abl & ~0xfffUL) + 0x800);
 	}
-	stage_str("smmu");
-	smmu_probe();
+	/* smmu_probe(): done (dm3q ufs1: SID 0x60 -> CB0, SCTLR.M=0 bypass, no faults) */
+	(void)smmu_probe;
 }
