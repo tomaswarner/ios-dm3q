@@ -335,6 +335,15 @@
   crosses as its raw value (TryFrom<u32>/from_raw). smoke.c = compute + render (colored_vertex/fragment
   triangle into an 8x8 RGBA8 private target, blit readback) + invert_texels: all pass on the Mac AND on the
   phone via sweetrun (24 s): `compute 1024/1024, render 64/64, texture 256/256, SWEETMETAL OK`.
+  **HANDOFF (paused 2026-10-21 ~14:40 by the user):** phone runs root test4 + boot x20s (sweetrun up when
+  booted; just plug the cable, Mac IP is automatic; start a UDP receiver on 5140 for the live log).
+  Started, not done: (a) slice 3 = vertex descriptors (metal2vulkan::pipeline::VertexDescriptor/
+  VertexAttributeDescriptor/VertexBufferLayoutDescriptor), depth/stencil (metal::state::DepthStencilDescriptor,
+  Device::new_depth_stencil_state, RenderPassDepth/StencilAttachmentDescriptor texture/level/slice/load/
+  store/clear_depth/clear_stencil, encoder set_depth_stencil_state/set_cull_mode/set_front_facing_winding)
+  - nothing written yet; (b) RE of iOS 16 Metal device registration (Metal `_getMetalPluginClassForService`
+  0x181a3c7c8, `__MTLCreateSystemDefaultDevice_block_invoke` 0x181a37050; ipsw dyld disass on
+  apple/dsc/20H392__iPhone10,3_6) - subagent stopped before reporting.
   NEXT: vertex descriptors, depth/stencil states + attachments, IOSurface-backed textures, then the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
