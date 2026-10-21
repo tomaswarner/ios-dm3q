@@ -328,7 +328,15 @@
   /usr/lib/libvulkan.dylib (our mini-loader). Rebuilt + signed + `tools/sweetrun.py -f
   third_party/sweettest-ios/sm_smoke sm_smoke` (25 s incl. 28 MB upload): `device: llvmpipe (LLVM 23.1.4,
   128 bits)`, `1024/1024 correct`, `SWEETMETAL OK`. Userland iteration no longer needs any flash.
-  NEXT: sweetmetal textures/blit/render/IOSurface; a sweetrun tool that dumps the kernel SWEETLOG ring.
+  **sweetmetal slice 2 (src/graphics.rs, 2026-10-21 ~14:30):** textures (new/replaceRegion/getBytes),
+  samplers, render pipelines (color attachments + blending, depth/stencil formats), render passes/encoders
+  (vertex/fragment buffers/bytes/textures/samplers, viewport, scissor, draw, drawIndexed), compute
+  setTexture/setBytes, blit (buffer<->buffer/texture, texture->texture, fill, mipmaps). Every Metal enum
+  crosses as its raw value (TryFrom<u32>/from_raw). smoke.c = compute + render (colored_vertex/fragment
+  triangle into an 8x8 RGBA8 private target, blit readback) + invert_texels: all pass on the Mac AND on the
+  phone via sweetrun (24 s): `compute 1024/1024, render 64/64, texture 256/256, SWEETMETAL OK`.
+  NEXT: vertex descriptors, depth/stencil states + attachments, IOSurface-backed textures, then the
+  ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner

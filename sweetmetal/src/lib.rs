@@ -7,10 +7,11 @@
 //! reason in [`sm_last_error`]. Encoders follow Metal: `sm_*_end_encoding`
 //! consumes the encoder, so its pointer is dead afterwards.
 //!
-//! First slice: device, buffers, command queue and buffer, library, function,
-//! compute pipeline state and compute encoding. Textures, render and blit
-//! encoders, IOSurface-backed textures and events come next, in the order
-//! QuartzCore and CoreImage use them.
+//! Slices: device, buffers, command queue and buffer, library, function,
+//! compute pipeline state and compute encoding (here); textures, samplers,
+//! render pipelines and encoders, blit ([`graphics`]). IOSurface-backed
+//! textures, vertex descriptors, depth/stencil and events come next, in the
+//! order QuartzCore and CoreImage use them.
 
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Device,
@@ -74,6 +75,8 @@ macro_rules! release_fn {
         }
     };
 }
+
+mod graphics;
 
 release_fn!(sm_device_release, Device);
 release_fn!(sm_buffer_release, Buffer);

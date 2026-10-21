@@ -49,4 +49,106 @@ bool sm_compute_dispatch_threads(sm_compute_encoder *enc, uint64_t tx, uint64_t 
                                  uint64_t gx, uint64_t gy, uint64_t gz);
 bool sm_compute_end_encoding(sm_compute_encoder *enc); /* frees enc */
 
+/* ---- textures, samplers, render, blit (src/graphics.rs). Metal enums are raw values. ---- */
+typedef struct sm_texture sm_texture;
+typedef struct sm_sampler sm_sampler;
+typedef struct sm_render_pipeline sm_render_pipeline;
+typedef struct sm_render_encoder sm_render_encoder;
+typedef struct sm_blit_encoder sm_blit_encoder;
+
+typedef struct sm_texture_desc {
+	uint32_t texture_type;      /* MTLTextureType */
+	uint32_t pixel_format;      /* MTLPixelFormat */
+	uint64_t width, height, depth;
+	uint64_t mipmap_level_count, sample_count, array_length;
+	uint32_t usage;             /* MTLTextureUsage */
+	uint64_t resource_options;  /* MTLResourceOptions */
+} sm_texture_desc;
+
+sm_texture *sm_texture_new(const sm_device *dev, const sm_texture_desc *d);
+uint64_t sm_texture_width(const sm_texture *t);
+uint64_t sm_texture_height(const sm_texture *t);
+bool sm_texture_replace_region(const sm_texture *t, uint64_t x, uint64_t y, uint64_t w, uint64_t h,
+			       uint64_t level, uint64_t slice, const uint8_t *bytes, size_t len,
+			       uint64_t bytes_per_row, uint64_t bytes_per_image);
+bool sm_texture_get_bytes(const sm_texture *t, uint8_t *bytes, size_t len, uint64_t bytes_per_row,
+			  uint64_t bytes_per_image, uint64_t x, uint64_t y, uint64_t w, uint64_t h,
+			  uint64_t level, uint64_t slice);
+void sm_texture_release(sm_texture *t);
+
+typedef struct sm_sampler_desc {
+	uint32_t min_filter, mag_filter, mip_filter;           /* MTLSamplerMinMagFilter / MipFilter */
+	uint32_t s_address_mode, t_address_mode, r_address_mode; /* MTLSamplerAddressMode */
+	bool normalized_coordinates;
+} sm_sampler_desc;
+
+sm_sampler *sm_sampler_new(const sm_device *dev, const sm_sampler_desc *d);
+void sm_sampler_release(sm_sampler *s);
+
+typedef struct sm_color_attachment {
+	uint32_t pixel_format;  /* 0 = unused */
+	bool blending_enabled;
+	uint32_t source_rgb_blend_factor, destination_rgb_blend_factor, rgb_blend_operation;
+	uint32_t source_alpha_blend_factor, destination_alpha_blend_factor, alpha_blend_operation;
+	uint32_t write_mask;    /* MTLColorWriteMask */
+} sm_color_attachment;
+
+typedef struct sm_render_pipeline_desc {
+	const sm_function *vertex;
+	const sm_function *fragment;   /* may be NULL */
+	sm_color_attachment color[8];
+	uint32_t depth_format, stencil_format, raster_sample_count;  /* 0 = none / default */
+} sm_render_pipeline_desc;
+
+sm_render_pipeline *sm_render_pipeline_new(const sm_device *dev, const sm_render_pipeline_desc *d);
+void sm_render_pipeline_release(sm_render_pipeline *p);
+
+typedef struct sm_pass_color {
+	const sm_texture *texture;     /* NULL = unused */
+	uint64_t level, slice;
+	uint32_t load_action, store_action;  /* MTLLoadAction / MTLStoreAction */
+	double clear_color[4];
+} sm_pass_color;
+
+typedef struct sm_render_pass_desc {
+	sm_pass_color color[8];
+} sm_render_pass_desc;
+
+sm_render_encoder *sm_render_encoder_new(const sm_command_buffer *cb, const sm_render_pass_desc *d);
+bool sm_render_set_pipeline(sm_render_encoder *e, const sm_render_pipeline *p);
+bool sm_render_set_vertex_buffer(sm_render_encoder *e, const sm_buffer *b, uint64_t offset, uint32_t index);
+bool sm_render_set_vertex_bytes(sm_render_encoder *e, const void *bytes, size_t len, uint32_t index);
+bool sm_render_set_vertex_texture(sm_render_encoder *e, const sm_texture *t, uint32_t index);
+bool sm_render_set_fragment_buffer(sm_render_encoder *e, const sm_buffer *b, uint64_t offset, uint32_t index);
+bool sm_render_set_fragment_bytes(sm_render_encoder *e, const void *bytes, size_t len, uint32_t index);
+bool sm_render_set_fragment_texture(sm_render_encoder *e, const sm_texture *t, uint32_t index);
+bool sm_render_set_fragment_sampler(sm_render_encoder *e, const sm_sampler *s, uint32_t index);
+bool sm_render_set_viewport(sm_render_encoder *e, double x, double y, double w, double h, double znear, double zfar);
+bool sm_render_set_scissor(sm_render_encoder *e, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
+bool sm_render_draw(sm_render_encoder *e, uint32_t primitive, uint32_t start, uint32_t count,
+		    uint32_t instances, uint32_t base_instance);
+bool sm_render_draw_indexed(sm_render_encoder *e, uint32_t primitive, uint32_t index_count, uint32_t index_type,
+			    const sm_buffer *index_buffer, uint64_t index_offset, uint32_t instances,
+			    int32_t base_vertex, uint32_t base_instance);
+bool sm_render_end_encoding(sm_render_encoder *e); /* frees e */
+
+bool sm_compute_set_texture(sm_compute_encoder *e, const sm_texture *t, uint32_t index);
+bool sm_compute_set_bytes(sm_compute_encoder *e, const void *bytes, size_t len, uint32_t index);
+
+sm_blit_encoder *sm_blit_encoder_new(const sm_command_buffer *cb);
+bool sm_blit_copy_buffer(sm_blit_encoder *e, const sm_buffer *src, uint64_t src_offset,
+			 const sm_buffer *dst, uint64_t dst_offset, uint64_t size);
+bool sm_blit_fill_buffer(sm_blit_encoder *e, const sm_buffer *b, uint64_t start, uint64_t len, uint8_t value);
+bool sm_blit_buffer_to_texture(sm_blit_encoder *e, const sm_buffer *src, uint64_t offset, uint64_t bytes_per_row,
+			       uint64_t bytes_per_image, uint64_t w, uint64_t h, const sm_texture *dst,
+			       uint64_t slice, uint64_t level, uint64_t x, uint64_t y);
+bool sm_blit_texture_to_buffer(sm_blit_encoder *e, const sm_texture *src, uint64_t slice, uint64_t level,
+			       uint64_t x, uint64_t y, uint64_t w, uint64_t h, const sm_buffer *dst,
+			       uint64_t offset, uint64_t bytes_per_row, uint64_t bytes_per_image);
+bool sm_blit_texture_to_texture(sm_blit_encoder *e, const sm_texture *src, uint64_t src_slice, uint64_t src_level,
+				uint64_t sx, uint64_t sy, uint64_t w, uint64_t h, const sm_texture *dst,
+				uint64_t dst_slice, uint64_t dst_level, uint64_t dx, uint64_t dy);
+bool sm_blit_generate_mipmaps(sm_blit_encoder *e, const sm_texture *t);
+bool sm_blit_end_encoding(sm_blit_encoder *e); /* frees e */
+
 #endif
