@@ -196,6 +196,15 @@
   Next: touch (STM FTS over GENI SPI @0xa90000, IRQ GPIO 25, S2DOS05 rails), keys (PMK8550 PON 0x1300
   KPDPWR/RESIN, PM8550 GPIO6 vol+), RTC (PMK8550 RTC over SPMI), UFS HS-G2+ (PHY rate tables/adapt),
   USB (DWC3 0xa600000 for the live log), battery.
+- **Touch probe `shim/out/dm3q-touch1-boot.img` (DIAG=touch build, shim/touch.c):** STM fts2ba61y on QUP1 SE4
+  SPI 0xa90000 (qcom,spi-geni, qcom,la-vm), CS GPIO 47 by hand, IRQ GPIO 25, SPI max 10 MHz; pins 44/45/46 =
+  func 1 (qup1_se4_l0/l1/l2); rails S2DOS05 LDO2 1.8 V (tsp_io) / LDO3 3.0 V (tsp_avdd), both
+  regulator-boot-on. Clocks: GCC vote 0x152008 bits 18-21 (wrap1 core/2x/m_ahb/s_ahb) + 26 (s4), halt
+  0x1184e4, RCG 0x1184f0. Samsung S23 stm_spi framing: write C0+cmd (raw for A0/A2/A4/A7/FA/FB/D0); read
+  C0 reg, then D1 00 00 + dummy + data (rx[4]); events raw 87 (+dummy, rx[2]), 16 B: eid[1:0] tid[5:2]
+  act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
+  (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
+  scan A0 00 01. The probe prints touches for 30 s.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
