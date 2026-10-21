@@ -14,12 +14,11 @@
 
 #define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL
 
-#define GICD_BASE		0x17a00000UL
-#define GICR_BASE		0x17a60000UL
-#define GICR_SIZE		0x100000UL
-#define GICR_PE_SIZE		0x20000UL
+#define GICD_BASE		0x17100000UL	/* DM3Q interrupt-controller@17100000 */
+#define GICR_BASE		0x17180000UL
+#define GICR_SIZE		0x200000UL
+#define GICR_PE_SIZE		0x40000UL	/* DT redistributor-stride (GICv4 frames) */
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
 #define GICR_SGI		0x10000
@@ -30,8 +29,8 @@
 #define GICR_ISPENDR0		(GICR_SGI + 0x200)
 #define GICR_ISACTIVER0		(GICR_SGI + 0x300)
 #define GICR_ICFGR1		(GICR_SGI + 0xc04)
-#define VTIMER_INTID		19	/* DT: <GIC_PPI 3 ...>, not the usual 27 */
-#define PTIMER_INTID		18	/* DT: <GIC_PPI 2 ...> */
+#define VTIMER_INTID		27	/* DM3Q DT: GIC_PPI 11 */
+#define PTIMER_INTID		30	/* DM3Q DT: GIC_PPI 14 */
 #define SGI_INTID		1
 
 #define PSCI_VERSION		0x84000000UL
@@ -108,8 +107,7 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	delay_ms(after_s * 1000);
 	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
 	__asm__ volatile("dsb sy" ::: "memory");
-	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
-	wr32(PSHOLD, 0);
+	smc(PSCI_SYSTEM_RESET, 0, 0, 0);	/* SM8550 DT has no qcom,pshold */
 	for (;;)
 		__asm__ volatile("wfe");
 }

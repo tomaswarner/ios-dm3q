@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## DM3Q (Galaxy S23 Ultra SM-S918B) port: active handoff, branch `dm3q`
+
+- Hardware facts, memory map, touch/keys, flashing and risks: `docs/dm3q/PORT.md` (from the stock
+  firmware DTB + overlay board-id 13, confirmed `ro.boot.revision`=13 on the phone).
+- **Phone must stay on S918BXXS8DYDC (One UI 7, binary 8, CSC TPA).** One UI 8 removed OEM unlock and
+  binaries cannot be downgraded. Samsung OTA (`com.wssyncmldm`, `com.sec.android.soagent`) disabled via
+  `pm disable-user` on 2026-10-20; a factory reset (incl. the OEM unlock wipe) re-enables them.
+- No `fastboot boot` on Samsung: every test flashes `boot` (tar) via Odin / `samloader flash`, and the
+  phone's own stock `boot.img` is flashed back to return to Android. Boot header v4; DTB stays in stock
+  `vendor_boot`.
+- Done (2026-10-20): board constants in `shim/console.h`, `shim/mmu.h`, `shim/shim.c`, `tools/mkadt.py`
+  (GIC 0x17100000/0x17180000 stride 0x40000, timers 27/30, FB 0xb8000000 1440x3088, PSCI reset, no PSHOLD).
+  Diagnostic shim `shim/diag.c` + `shim/build-diag.sh` (no XNU; screen calibration, EL/CPU ids,
+  /memory banks from ABL's DTB, PSCI/SMCCC, hypervisor UID, GIC ids, uptime until reset).
+  Host render: `cc -DDIAG_HOST -o out/diag_host diag_host.c diag.c console.c` (checked against the real DTB).
+- **Not tested on hardware.** Bootloader still locked. Next: OEM unlock (wipe, Knox), flash
+  `dm3q-vbmeta-disabled.tar` + `dm3q-diag-boot.tar`, photograph the screen, then fix RAM base/size in
+  `tools/mkadt.py`. Still TODO before XNU: `shim/build.sh` header v4, `mmu.c` maps only 0-8 GiB (DRAM is
+  at 0x8_80000000+), Gunyah watchdog, UFS behind SMMU (SID 0x60), touch = STM FTS over GENI SPI.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
