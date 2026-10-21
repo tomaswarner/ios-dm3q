@@ -55,6 +55,11 @@ NSError *sm_error(NSString *what);
 - (instancetype)initWithDevice:(id<MTLDevice>)device buffer:(sm_buffer *)b options:(MTLResourceOptions)options;
 @end
 
+@interface SweetMTLComputeCommandEncoder : NSObject <MTLComputeCommandEncoder>
+@property (readonly) sm_compute_encoder *sm;
+@property (readonly) NSMutableArray *held;
+@end
+
 @interface SweetMTLCommandBuffer : NSObject <MTLCommandBuffer>
 @property (readonly) sm_command_buffer *sm;
 @property (readonly) NSMutableArray *held;  /* resources kept alive until completion */

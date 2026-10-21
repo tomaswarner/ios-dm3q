@@ -610,6 +610,9 @@ fail:
 	_e = NULL;
 }
 
+/* no tile shading: one "tile" is irrelevant, but CA reads these */
+- (NSUInteger)tileWidth { return 16; }
+- (NSUInteger)tileHeight { return 16; }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u { }
 - (void)useHeap:(id<MTLHeap>)h { }
 - (void)textureBarrier { }
@@ -711,6 +714,40 @@ MISSING_LOGGER
 - (void)pushDebugGroup:(NSString *)string { }
 - (void)popDebugGroup { }
 MISSING_LOGGER
+@end
+
+/* ---- compute encoder: textures and samplers ---------------------------------------------- */
+
+@implementation SweetMTLComputeCommandEncoder (Render)
+
+- (void)setTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i
+{
+	if (t)
+		[self.held addObject:t];
+	if (!sm_compute_set_texture(self.sm, ((SweetMTLTexture *)t).sm, (uint32_t)i))
+		sm_error(@"compute setTexture");
+}
+
+- (void)setTextures:(const id<MTLTexture> __unsafe_unretained *)ts withRange:(NSRange)r
+{
+	for (NSUInteger k = 0; k < r.length; k++)
+		[self setTexture:ts[k] atIndex:r.location + k];
+}
+
+- (void)setSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i
+{
+	if (s)
+		[self.held addObject:s];
+	if (!sm_compute_set_sampler(self.sm, ((SweetMTLSamplerState *)s).sm, (uint32_t)i))
+		sm_error(@"compute setSamplerState");
+}
+
+- (void)setSamplerStates:(const id<MTLSamplerState> __unsafe_unretained *)ss withRange:(NSRange)r
+{
+	for (NSUInteger k = 0; k < r.length; k++)
+		[self setSamplerState:ss[k] atIndex:r.location + k];
+}
+
 @end
 
 /* ---- command buffer: render and blit encoders --------------------------------------------- */

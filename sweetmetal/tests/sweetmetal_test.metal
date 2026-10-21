@@ -60,3 +60,11 @@ struct AttrOut {
 };
 vertex AttrOut attr_vertex(AttrIn in [[stage_in]]) { return { float4(in.position, 1), in.color }; }
 fragment float4 attr_fragment(AttrOut in [[stage_in]]) { return in.color; }
+
+// function constants: out[i] = in[i] * factor (+ 1 when add_one)
+constant float factor [[function_constant(0)]];
+constant bool add_one [[function_constant(1)]];
+kernel void scaled(device const float *in [[buffer(0)]], device float *out [[buffer(1)]],
+                   uint i [[thread_position_in_grid]]) {
+    out[i] = in[i] * factor + (add_one ? 1.0f : 0.0f);
+}

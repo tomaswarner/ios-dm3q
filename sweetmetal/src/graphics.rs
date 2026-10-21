@@ -8,7 +8,7 @@ use crate::{boxed, set_error};
 use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::metal::{
-    BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DepthClipMode,
+    BarrierScope, BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DepthClipMode,
     IndexType, PixelFormat, PrimitiveType, SamplerAddressMode, SamplerMinMagFilter,
     SamplerMipFilter, StencilOperation, TextureType, TextureUsage, TriangleFillMode, VertexFormat,
     VertexStepFunction, Winding,
@@ -668,6 +668,35 @@ pub unsafe extern "C" fn sm_render_end_encoding(e: *mut RenderCommandEncoder) ->
 #[no_mangle]
 pub unsafe extern "C" fn sm_compute_set_texture(e: *mut ComputeCommandEncoder, t: *const Texture, index: u32) -> bool {
     !e.is_null() && ok((*e).set_texture(opt(t), index))
+}
+
+/// `setSamplerState:atIndex:` on a compute encoder.
+#[no_mangle]
+pub unsafe extern "C" fn sm_compute_set_sampler(e: *mut ComputeCommandEncoder, s: *const SamplerState, index: u32) -> bool {
+    !e.is_null() && ok((*e).set_sampler_state(opt(s), index))
+}
+
+/// `setBufferOffset:atIndex:` on a compute encoder.
+#[no_mangle]
+pub unsafe extern "C" fn sm_compute_set_buffer_offset(e: *mut ComputeCommandEncoder, offset: u64, index: u32) -> bool {
+    !e.is_null() && ok((*e).set_buffer_offset(offset, index))
+}
+
+/// `setThreadgroupMemoryLength:atIndex:`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_compute_set_threadgroup_memory(e: *mut ComputeCommandEncoder, length: u32, index: u32) -> bool {
+    !e.is_null() && ok((*e).set_threadgroup_memory_length(length, index))
+}
+
+/// `memoryBarrierWithScope:` (raw `MTLBarrierScope`).
+#[no_mangle]
+pub unsafe extern "C" fn sm_compute_memory_barrier(e: *mut ComputeCommandEncoder, scope: u32) -> bool {
+    let Some(sc) = raw::<BarrierScope>(scope) else { return false };
+    if e.is_null() {
+        return false;
+    }
+    (*e).memory_barrier_with_scope(sc);
+    true
 }
 
 /// `setBytes:length:atIndex:` on a compute encoder.

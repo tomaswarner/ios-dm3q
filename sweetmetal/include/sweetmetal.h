@@ -200,6 +200,10 @@ bool sm_render_end_encoding(sm_render_encoder *e); /* frees e */
 
 bool sm_compute_set_texture(sm_compute_encoder *e, const sm_texture *t, uint32_t index);
 bool sm_compute_set_bytes(sm_compute_encoder *e, const void *bytes, size_t len, uint32_t index);
+bool sm_compute_set_sampler(sm_compute_encoder *e, const sm_sampler *s, uint32_t index);
+bool sm_compute_set_buffer_offset(sm_compute_encoder *e, uint64_t offset, uint32_t index);
+bool sm_compute_set_threadgroup_memory(sm_compute_encoder *e, uint32_t length, uint32_t index);
+bool sm_compute_memory_barrier(sm_compute_encoder *e, uint32_t scope);  /* MTLBarrierScope */
 
 sm_blit_encoder *sm_blit_encoder_new(const sm_command_buffer *cb);
 bool sm_blit_copy_buffer(sm_blit_encoder *e, const sm_buffer *src, uint64_t src_offset,

@@ -146,8 +146,6 @@ MISSING_LOGGER
 
 /* ---- command encoding --------------------------------------------------------------------- */
 
-@interface SweetMTLComputeCommandEncoder : NSObject <MTLComputeCommandEncoder>
-@end
 
 @implementation SweetMTLComputeCommandEncoder {
 	id<MTLDevice> _device;
@@ -168,7 +166,43 @@ MISSING_LOGGER
 }
 
 - (id<MTLDevice>)device { return _device; }
+- (sm_compute_encoder *)sm { return _enc; }
+- (NSMutableArray *)held { return _held; }
 - (MTLDispatchType)dispatchType { return MTLDispatchTypeSerial; }
+
+- (void)setBuffers:(const id<MTLBuffer> __unsafe_unretained *)bs offsets:(const NSUInteger *)offs withRange:(NSRange)r
+{
+	for (NSUInteger k = 0; k < r.length; k++)
+		[self setBuffer:bs[k] offset:offs[k] atIndex:r.location + k];
+}
+
+- (void)setBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index
+{
+	if (!sm_compute_set_buffer_offset(_enc, offset, (uint32_t)index))
+		sm_error(@"setBufferOffset");
+}
+
+- (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index
+{
+	if (!sm_compute_set_threadgroup_memory(_enc, (uint32_t)length, (uint32_t)index))
+		sm_error(@"setThreadgroupMemoryLength");
+}
+
+- (void)memoryBarrierWithScope:(MTLBarrierScope)scope
+{
+	if (!sm_compute_memory_barrier(_enc, (uint32_t)scope))
+		sm_error(@"memoryBarrierWithScope");
+}
+
+- (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained *)resources count:(NSUInteger)count
+{
+	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+}
+
+- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u { }
+- (void)useResources:(const id<MTLResource> __unsafe_unretained *)r count:(NSUInteger)n usage:(MTLResourceUsage)u { }
+- (void)useHeap:(id<MTLHeap>)h { }
+- (void)useHeaps:(const id<MTLHeap> __unsafe_unretained *)h count:(NSUInteger)n { }
 
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state
 {
@@ -214,6 +248,7 @@ MISSING_LOGGER
 - (void)insertDebugSignpost:(NSString *)string { }
 - (void)pushDebugGroup:(NSString *)string { }
 - (void)popDebugGroup { }
+- (uint64_t)globalTraceObjectID { return (uint64_t)(uintptr_t)self; }
 MISSING_LOGGER
 @end
 
@@ -221,6 +256,7 @@ MISSING_LOGGER
 	id<MTLCommandQueue> _queue;
 	sm_command_buffer *_cb;
 	NSMutableArray *_held, *_scheduled, *_completed;
+	NSMutableDictionary *_userDictionary;
 	MTLCommandBufferStatus _status;
 	NSError *_error;
 	dispatch_semaphore_t _done;
@@ -315,6 +351,16 @@ MISSING_LOGGER
 - (void)commitAndWaitUntilSubmitted { [self commit]; }
 - (void)setProtectionOptions:(uint64_t)o { }
 - (uint64_t)protectionOptions { return 0; }
+/* SPI MetalPerformanceShaders keeps per-command-buffer state in */
+- (NSMutableDictionary *)userDictionary
+{
+	@synchronized(self) {
+		if (!_userDictionary)
+			_userDictionary = [NSMutableDictionary dictionary];
+		return _userDictionary;
+	}
+}
+- (uint64_t)globalTraceObjectID { return (uint64_t)(uintptr_t)self; }
 
 - (void)waitUntilCompleted
 {
@@ -426,7 +472,10 @@ MISSING_LOGGER
 	}
 	char name[128];
 	sm_device_name(_dev, name, sizeof name);
-	_name = [NSString stringWithFormat:@"SweetMetal (%s)", name];
+	/* MetalPerformanceShaders picks its kernels by device name ("Apple A11 GPU", ...); an unknown
+	 * name makes it look up functions that do not exist. SWEETMETAL_NAME overrides (tests). */
+	const char *override = getenv("SWEETMETAL_NAME");
+	_name = override && *override ? @(override) : [NSString stringWithFormat:@"SweetMetal (%s)", name];
 	_air = [NSMutableDictionary dictionary];
 	_pipelines = [NSMutableDictionary dictionary];
 	SMLOG("device up: %s, accelerator port %u", _name.UTF8String, port);
@@ -435,6 +484,39 @@ MISSING_LOGGER
 
 - (NSString *)name { return _name; }
 - (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count == 1; }
+
+/* What CoreAnimation's new_metal_context asks (_MTLDevice would answer the A11's: tile shaders,
+ * memoryless targets, raster order groups...). Only what the Vulkan backend really does is YES. */
+- (BOOL)supportsTileShaders { return NO; }
+- (BOOL)supportsMemorylessRenderTargets { return NO; }
+- (BOOL)supportsRasterOrderGroups { return NO; }
+- (BOOL)areRasterOrderGroupsSupported { return NO; }
+- (BOOL)supportsSIMDGroup { return NO; }
+- (BOOL)supportsNativeHardwareFP16 { return NO; }
+- (BOOL)supportsYCBCRFormats12 { return NO; }
+- (BOOL)supportsYCBCRPackedFormats12 { return NO; }
+- (BOOL)supportsExtendedXR10Formats { return NO; }
+- (BOOL)supportsImageBlocks { return NO; }
+- (BOOL)supportsImageBlockSampleCoverageControl { return NO; }
+- (BOOL)supportsQuadGroup { return NO; }
+- (NSString *)vendorName { return @"SweetMetal"; }
+- (NSString *)productName { return _name; }
+- (NSUInteger)maxColorAttachments { return 8; }
+- (NSUInteger)maxFragmentTextures { return 31; }
+- (NSUInteger)maxVertexTextures { return 31; }
+- (NSUInteger)maxFragmentSamplers { return 16; }
+- (NSUInteger)maxVertexSamplers { return 16; }
+- (NSUInteger)maxTextureWidth2D { return 16384; }
+- (NSUInteger)maxTextureHeight2D { return 16384; }
+- (NSUInteger)minConstantBufferAlignmentBytes { return 256; }
+- (NSUInteger)iosurfaceTextureAlignmentBytes { return 16; }
+- (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes { return 16; }
+- (NSUInteger)deviceLinearTextureAlignmentBytes { return 16; }
+- (NSUInteger)deviceLinearReadOnlyTextureAlignmentBytes { return 16; }
+- (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format { return 16; }
+- (NSUInteger)maxThreadgroupMemoryLength { return 32768; }
+- (MTLReadWriteTextureTier)readWriteTextureSupport { return MTLReadWriteTextureTierNone; }
+- (MTLArgumentBuffersTier)argumentBuffersSupport { return MTLArgumentBuffersTier1; }
 /* AGXA11FamilyDevice answers 5 */
 - (NSUInteger)featureProfile { return 5; }
 
@@ -585,6 +667,44 @@ static NSData *bitcode(id<MTLFunction> function)
 	if (reflection)
 		*reflection = nil;
 	return [self newComputePipelineStateWithFunction:function error:error];
+}
+
+/* From a descriptor (MetalPerformanceShaders' path): the compute function; linked functions,
+ * driver options and the threadgroup-size hint do not change our translation. */
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d
+							      options:(MTLPipelineOption)options
+							   reflection:(MTLAutoreleasedComputePipelineReflection *)reflection
+								error:(NSError **)error
+{
+	if (reflection)
+		*reflection = nil;
+	if (!d.computeFunction) {
+		if (error)
+			*error = [NSError errorWithDomain:@"SweetMetal" code:4 userInfo:@{ NSLocalizedDescriptionKey : @"no compute function" }];
+		return nil;
+	}
+	return [self newComputePipelineStateWithFunction:d.computeFunction error:error];
+}
+
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d error:(NSError **)error
+{
+	return [self newComputePipelineStateWithDescriptor:d options:0 reflection:NULL error:error];
+}
+
+- (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)options
+			    completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)handler
+{
+	NSError *error = nil;
+	id<MTLComputePipelineState> p = [self newComputePipelineStateWithDescriptor:d options:options reflection:NULL error:&error];
+	handler(p, nil, error);
+}
+
+- (void)newComputePipelineStateWithFunction:(id<MTLFunction>)function options:(MTLPipelineOption)options
+			  completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)handler
+{
+	NSError *error = nil;
+	id<MTLComputePipelineState> p = [self newComputePipelineStateWithFunction:function error:&error];
+	handler(p, nil, error);
 }
 
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)function

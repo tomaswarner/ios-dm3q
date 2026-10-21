@@ -342,6 +342,48 @@ static void render_sampled(id<MTLDevice> dev, id<MTLLibrary> lib, id<MTLCommandQ
 		^(int x, int y) { return (const uint8_t *)texels[y * SIDE + x]; }, ^(int x, int y) { return 's'; });
 }
 
+/* newFunctionWithName:constantValues:error: (function constants: factor 3, add_one) and a run */
+static void specialized(id<MTLDevice> dev, id<MTLLibrary> lib, id<MTLCommandQueue> q)
+{
+	MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+	float factor = 3;
+	bool one = true;
+	[cv setConstantValue:&factor type:MTLDataTypeFloat atIndex:0];
+	[cv setConstantValue:&one type:MTLDataTypeBool atIndex:1];
+	NSError *error = nil;
+	id<MTLFunction> f = nil;
+	@try {
+		f = [lib newFunctionWithName:@"scaled" constantValues:cv error:&error];
+	} @catch (NSException *e) {
+		printf("exception: %s\n", e.reason.UTF8String);
+	}
+	printf("specialized function: %s (%s)\n", f ? "ok" : "nil", NSStringFromClass([(id)f class]).UTF8String);
+	check(f != nil, "newFunctionWithName:constantValues:", error);
+	if (!f)
+		return;
+	id<MTLComputePipelineState> p = [dev newComputePipelineStateWithFunction:f error:&error];
+	check(p != nil, "specialized pipeline", error);
+	if (!p)
+		return;
+	id<MTLBuffer> in = [dev newBufferWithLength:256 options:0], out = [dev newBufferWithLength:256 options:0];
+	for (int i = 0; i < 64; i++)
+		((float *)in.contents)[i] = i;
+	id<MTLCommandBuffer> cb = [q commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	[e setComputePipelineState:p];
+	[e setBuffer:in offset:0 atIndex:0];
+	[e setBuffer:out offset:0 atIndex:1];
+	[e dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	[e endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+	int good = 0;
+	for (int i = 0; i < 64; i++)
+		good += ((float *)out.contents)[i] == i * 3.0f + 1;
+	printf("%s function constants: %d/64\n", good == 64 ? "ok  " : "FAIL", good);
+	failures += good != 64;
+}
+
 int main(int argc, char **argv)
 {
 	@autoreleasepool {
@@ -375,6 +417,7 @@ int main(int argc, char **argv)
 			render_iosurface(dev, lib, q);
 			render_depth(dev, lib, q);
 			render_sampled(dev, lib, q);
+			specialized(dev, lib, q);
 		} else
 			printf("skip  %s (no test metallib)\n", testlib);
 		/* an unimplemented selector: logged and answered nil (not SWEETMETAL_STRICT) */

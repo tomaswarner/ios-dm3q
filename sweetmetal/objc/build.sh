@@ -18,6 +18,7 @@ $CC -Wno-objc-protocol-property-synthesis -Wno-protocol -Wno-objc-protocol-metho
 cp objc/Info.plist "$OUT/Info.plist"
 xcrun -sdk iphoneos clang -target arm64-apple-ios16.0 -O2 objc/sm_install.c -o "$OUT/sm_install"
 $CC objc/ca_probe.m -framework Foundation -framework Metal -framework QuartzCore -framework CoreGraphics -o "$OUT/ca_probe"
+$CC objc/mps_probe.m -framework Foundation -framework Metal -framework MetalPerformanceShaders -o "$OUT/mps_probe"
 $CC objc/mtl_probe.m -framework Foundation -framework Metal -framework IOSurface -o "$OUT/mtl_probe"
 xcrun -sdk iphoneos metal -target air64-apple-ios16.0 -o "$OUT/sweetmetal_test.metallib" tests/sweetmetal_test.metal
 codesign -f -s - -i SweetMetal "$OUT/SweetMetal.dylib"
@@ -25,3 +26,4 @@ codesign -f -s - -i mtl_probe "$OUT/mtl_probe"
 codesign -f -s - -i com.sweet.SweetMetal "$OUT/SweetMetal"
 codesign -f -s - -i sm_install "$OUT/sm_install"
 codesign -f -s - -i ca_probe "$OUT/ca_probe"
+codesign -f -s - -i mps_probe "$OUT/mps_probe"
