@@ -162,6 +162,9 @@
   userdata in the GPT, reads the 0047 SWEETLOG header at the last 1025 blocks, renders the last ~190 lines
   of the console stream full-screen in the 8x16 font (180 cols) + footer total/seq. Workflow: boot iOS
   image (ufsrw=1 so the log is flushed every 10 s), Download Mode, flash logview to BOOT, one photo, flash back.
+- **Boot x6 (writable root, IMG_5747): no panic; backboardd runs**, console flooded with
+  `[backboardd] IOServiceMatchingfailed for: AppleM2ScalerCSCDriver` (no hardware scaler; harmless spam).
+  x7 = x6 + `sweetfb_noconsole=1 sweetfb_hz=30` (README) so the CPU-copied CoreAnimation frames are visible.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
