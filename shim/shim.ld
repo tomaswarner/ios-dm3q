@@ -16,6 +16,10 @@ SECTIONS
 	. = ALIGN(4096);
 	_sec_stacks = .;
 	. += 8 * 0x1000;
+	/* DM3Q: ABL takes the generic ramdisk from init_boot (8 MB) and ignores
+	 * boot's, so the xnu payload is linked into the image (build.sh). */
+	. = ALIGN(16384);
+	.payload : { _payload_start = .; KEEP(*(.payload)) _payload_end = .; }
 	_end = .;
 	/DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }

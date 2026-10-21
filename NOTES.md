@@ -23,6 +23,13 @@
   sweetusb=0 because 0072 pokes sweet clock registers). Expect kernel text, then no root (userdata is
   still Android). Patches still sweet-specific: 0046 (FB geometry/dpi), 0058/0061 (1080x2400 touch/display
   layout), 0060/0062 (SPMI keys, GENI I2C touch, RPMh), 0072-0077 (USB).
+- **Boot x1 result (2026-10-20, IMG_5711):** shim ran but `no SWEETXNU payload`: initrd 0xB70EB000-0xB7FFEF04
+  = vendor ramdisk + **init_boot** ramdisk + bootconfig. ABL ignores boot's ramdisk on this GKI device
+  (init_boot is only 8 MB). Fix: payload linked into the shim Image (`shim.ld` .payload, `build.sh $1`),
+  image `shim/out/dm3q-x2-boot.img`. The fallback UFS probe (read-only): UFSHCI 4.0 (ver 0x400,
+  CAP 0x3587031F, 64AS), ABL's UTRLBA 0xC70E6000; with our list at 0xA8015000 every command (TUR, CAP,
+  READ) timed out (rc=1, doorbell never cleared): likely the SMMU (UFS SID 0x60) blocks our DMA. To try:
+  reuse ABL's UTRL area / read apps_smmu S2CR for SID 0x60.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

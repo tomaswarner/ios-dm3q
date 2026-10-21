@@ -76,19 +76,27 @@ static int magic_ok(const char *m)
 
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
+extern char _payload_start[], _payload_end[];	/* shim.ld; empty without a payload */
+
 const char *loader_boot(uintptr_t dtb)
 {
 	uint64_t rd_start, rd_end;
 
+	if ((uintptr_t)(_payload_end - _payload_start) >= sizeof(struct payload)) {
+		/* DM3Q: payload linked into the image (ABL ignores boot's ramdisk) */
+		rd_start = (uintptr_t)_payload_start;
+		rd_end = (uintptr_t)_payload_end;
+		con_hex2("PAYLOAD", "linked at=", rd_start, "size=", rd_end - rd_start);
+		goto found;
+	}
 	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
 	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
 		return "no initrd in /chosen";
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
 	/*
-	 * Boot header v4 (DM3Q): ABL concatenates the vendor_boot ramdisk and
-	 * ours, so the payload sits behind Samsung's vendor ramdisk. build.sh
-	 * pads ours so it lands 8-byte aligned; scan for it in 8-byte steps.
+	 * Payload in the initrd (sweet). On a boot v4 ABL it would sit behind
+	 * other ramdisks, so scan for it in 8-byte steps.
 	 */
 	uintptr_t at = rd_start;
 	while (at + sizeof(struct payload) <= rd_end && !magic_ok((const char *)at))
@@ -104,6 +112,7 @@ const char *loader_boot(uintptr_t dtb)
 	}
 	con_hex2("PAYLOAD", "off=", at - rd_start, 0, 0);
 	rd_start = at;
+found:;
 	const struct payload *p = (const struct payload *)rd_start;
 	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
 		return "bad payload header";
