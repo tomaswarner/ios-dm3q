@@ -1,0 +1,15 @@
+[package]
+name = "sweetmetal"
+version = "0.1.0"
+edition = "2021"
+description = "C API over metal2vulkan-runtime for SweetMetal.bundle (S23 iOS port)"
+license = "LGPL-3.0-or-later"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+metal2vulkan-runtime = { path = "../../third_party/metal2vulkan/crates/metal2vulkan-runtime" }
+
+[profile.release]
+panic = "abort"

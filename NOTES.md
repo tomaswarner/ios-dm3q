@@ -274,6 +274,18 @@
   0x3d6a000, GDSCs CX/GX, zap via SCM/PAS. Plan: A) make CA/CoreImage take CA::OGL::SW / software CI
   instead of the empty EAGL path (days-2 wks); DPU scaling (2-4 wks); C) Adreno CP bring-up (1-3 months);
   B) Metal (6+ months).
+- **metal2vulkan runtime tests on the phone (boot x19s + root test2):** 811 passed, 248 failed; the failures
+  seen are test-environment only (tests read validation/profiles/*.json from the Mac source tree; some load
+  Vulkan as "libvulkan.so.1"). Next batch: ship the profiles dir and a libvulkan.so.1 alias.
+  `tools/sweettest/libvulkan_shim.c` = /usr/lib/libvulkan.dylib mini-loader (ash dlopens libvulkan.dylib,
+  resolves vkGetInstanceProcAddr; forwards to lavapipe's vk_icdGetInstanceProcAddr).
+- **sweetmetal (port/sweetmetal, 2026-10-21):** Rust staticlib with a C API over metal2vulkan-runtime for
+  SweetMetal.bundle: device, buffers, queue, command buffer, library (metallib), function, compute pipeline,
+  compute encoder (25 sm_* exports, builds on macOS). Runtime objects are owned values (encoders consumed by
+  end_encoding) -> opaque boxed pointers. NEXT: sm_library_new_with_air (metal2vulkan::library::Library::
+  from_air + new_library_with_compile_library) and a C smoke test running runtime_examples.ll's
+  scale_and_offset (output[i] = input[i]*scale + i) on host lavapipe, then aarch64-apple-ios build, then
+  textures/blit/render/IOSurface, then the ObjC bundle + kernel IOAcceleratorES behind sweetmetal=1.
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner
   (`tools/sweettest/`, `tools/add-sweettest.sh`; launchd run-once job, tests chosen by boot-arg
   `sweettest=a,b`, output via /dev/null + `sweetnull=...` to the USB live log; no network service).
