@@ -311,6 +311,51 @@ static int gpi_wait(uint64_t end)
 }
 
 static int gpi_ok;
+static uint32_t gpi_clk_level;
+
+/*
+ * gcc_qupv3_wrap1_s4_clk_src is a DFS RCG on sm8550 (gcc_dfs_clocks[]): with
+ * CMD_DFSR bit 0 set the SE picks one of 8 PERF levels through SE_GENI_CLK_SEL
+ * (+ GENI_DFS_IF_CFG bit 0) and the RCG CFG register is ignored.  touch13: data
+ * reached the SE (DMA len_in 6), cmd SPI_TX loaded, M clk div set, yet the
+ * command never finishes = no serial clock.  Find (or make) a 19.2 MHz XO level.
+ */
+#define S4_RCG		(GCC + 0x184f0)
+#define S4_CMD_DFSR	(S4_RCG + 0x14)
+#define S4_PERF(l)	(S4_RCG + 0x1c + 4 * (l))
+#define S4_PERF_M(l)	(S4_RCG + 0x5c + 4 * (l))
+#define S4_PERF_N(l)	(S4_RCG + 0x9c + 4 * (l))
+#define SE_DFS_IF_CFG	0x080
+
+static void se_clock_dfs(void)
+{
+	uint32_t dfsr = rd(S4_CMD_DFSR);
+	con_hex2("DFS", "cmd_dfsr=", dfsr, "se dfs_if=", rd(SE + SE_DFS_IF_CFG));
+	for (int l = 0; l < 8; l += 2)
+		con_hex2("DFS", "perf l/l+1=", rd(S4_PERF(l)), "", rd(S4_PERF(l + 1)));
+	con_hex2("DFS", "m0=", rd(S4_PERF_M(0)), "n0=", rd(S4_PERF_N(0)));
+	if (!(dfsr & 1)) {
+		gpi_clk_level = 0;			/* plain RCG: CFG (XO) feeds the SE */
+		return;
+	}
+	int lvl = -1;
+	for (int l = 0; l < 8 && lvl < 0; l++) {
+		uint32_t p = rd(S4_PERF(l));
+		if (p && ((p >> 8) & 7) == 0 && ((p >> 12) & 3) == 0)	/* XO, no M/N */
+			lvl = l;
+	}
+	if (lvl < 0) {					/* coreboot clock_configure_dfsr: level 0 = XO / 1 */
+		wr(S4_PERF(0), 0u << 8 | 1u);
+		wr(S4_PERF_M(0), 0);
+		wr(S4_PERF_N(0), 0);
+		lvl = 0;
+		con_hex2("DFS", "programmed l0=", rd(S4_PERF(0)), "", 0);
+	}
+	gpi_clk_level = (uint32_t)lvl;
+	wr(SE + SE_DFS_IF_CFG, rd(SE + SE_DFS_IF_CFG) | 1u);
+	wr(SE + SE_CLK_SEL, gpi_clk_level);
+	con_hex2("DFS", "use level=", gpi_clk_level, "dfs_if=", rd(SE + SE_DFS_IF_CFG));
+}
 
 /* apps SMMU (MMU-500 @ 0x15000000): how is this stream routed? type 0 = translate, 1 = bypass, 2 = fault */
 static void smmu_sid_check(uint32_t sid)
@@ -393,7 +438,7 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 			uint32_t tx_cfg = (8 - 4) | 1u << 24 | 1u << 25;
 			con_hex2("GPI A", "tx only, no event; tre at ", (uint32_t)(uintptr_t)&ch_ring[0][ch_wp[0] * 4], "", 0);
 			udelay(1500000);
-			ch_queue(0, tx_cfg, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+			ch_queue(0, tx_cfg, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
 			ch_queue(0, 1u /* SPI_TX */, 0, 0, TRE_GO << 16 | TF_CHAIN);
 			ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16);
 			ch_ring_db(0);
@@ -406,7 +451,7 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 			con_hex2("SE A", "rcg cmd=", rd(GCC_S4_RCG), "cbcr=", rd(GCC + 0x184e4));
 			wr(SE + SE_M_IRQ_CLR, rd(SE + SE_M_IRQ));
 			udelay(1500000);
-			ch_queue(0, tx_cfg, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+			ch_queue(0, tx_cfg, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
 			ch_queue(0, 1u, 0, 0, TRE_GO << 16 | TF_CHAIN);
 			ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 			ch_ring_db(0);
@@ -423,7 +468,7 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(1);
 		/* TX: CONFIG0 (8-bit word, mode 0, packing, clk src 0 div 2), GO duplex, DMA */
-		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
 		ch_queue(0, 3u /* SPI_DUPLEX */, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
 		ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(0);
@@ -438,6 +483,8 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 			last_fail_irq = ch_state(0) << 4 | ch_state(1);
 			last_fail_fifo = rd(GLOB_IRQ_STTS) << 16 | (rd(CNTXT_TYPE_IRQ) & 0xffff);
 			gpi_err_info = rd(GPII_ERR);
+			if (ch_state(0) == 0xf || ch_state(1) == 0xf)
+				gpi_ok = 0;			/* channels dead: stop (FIFO path fails fast) */
 			return done < 0 ? done : -2;
 		}
 		return 0;
@@ -602,6 +649,7 @@ void touch_probe(void)
 	wr(SE + SE_RX_PACK1, PACK1);
 	wr(SE + SE_CLK_SEL, 0);
 	wr(SE + SE_MCLK_CFG, (2u << 4) | 1u);
+	se_clock_dfs();
 	smmu_sid_check(0xb6);
 	int smmu_ok = smmu_route_sid_like(0xb6, 0x60);	/* gpi_dma1 TRE/event fetch, like UFS */
 	/* touch10: TREs fetched fine, reboot on the first data read: in GSI mode the
