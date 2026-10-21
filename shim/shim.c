@@ -12,6 +12,7 @@
 #include "loader.h"
 #include "ufs.h"
 #include "touch.h"
+#include "perf.h"
 
 #define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
@@ -411,6 +412,13 @@ void shim_main(uint64_t dtb)
 	if ((uintptr_t)_payload_end != (uintptr_t)_payload_start) {
 		test_ufs_linux();
 		touch_preboot();	/* QUP1 core clock vote + STM touch rails, for xnu's sweet_stm */
+		perf_preboot();		/* CPU clusters + DDR/LLCC: xnu has no DCVS for them */
+		con_str("PERF", "booting iOS in 6 s (photo)");
+		for (volatile unsigned long i = 0; i < 1; i++) {
+			uint64_t t0, t;
+			__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t0));
+			do __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t)); while (t - t0 < 19200000ULL * 6);
+		}
 		con_skip();
 	}
 	const char *why = loader_boot(dtb);
