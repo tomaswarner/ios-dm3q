@@ -274,6 +274,15 @@
   0x3d6a000, GDSCs CX/GX, zap via SCM/PAS. Plan: A) make CA/CoreImage take CA::OGL::SW / software CI
   instead of the empty EAGL path (days-2 wks); DPU scaling (2-4 wks); C) Adreno CP bring-up (1-3 months);
   B) Metal (6+ months).
+- **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner
+  (`tools/sweettest/`, `tools/add-sweettest.sh`; launchd run-once job, tests chosen by boot-arg
+  `sweettest=a,b`, output via /dev/null + `sweetnull=...` to the USB live log; no network service).
+  jit_test: MAP_JIT RWX page, generated `mov w0,#42; ret` returned 42 (JIT OK, cs_enforcement_disable=1).
+  vk_test: lavapipe (Mesa, iOS 16 arm64 cross build) loaded without a loader, ICD interface 5, device
+  'llvmpipe (LLVM 23.1.4, 128 bits)' Vulkan 1.4, compute pipeline JIT-compiled, 256/256 values correct
+  (VULKAN OK). Root image test1 = clean root + CoreImage no-GL patch + /usr/local/sweettest/{sweettest,
+  jit_test,vk_test,libvulkan_lvp.dylib}. NEXT: SweetMetal.bundle (ObjC adapter over metal2vulkan-runtime)
+  + kernel IOAcceleratorES nub behind sweetmetal=1; check Bold Text no longer kills SpringBoard.
 - **🎉 USB WORKS on the S23 (boot x17s, kernel out-dm3q-010, 2026-10-21):** Mac enumerates "Sweet iOS (USB Ethernet)"
   (1209:0001, high speed), AppleUserECM -> en9; `sudo ifconfig en9 inet 192.168.7.1 netmask 255.255.255.0 up`,
   ping 192.168.7.2 ~2 ms, live kernel log on udp/5140 (`tools/sweet-usbnet-mac.sh ~/s23-log.txt`). Fixes: 0107
