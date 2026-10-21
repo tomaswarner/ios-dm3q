@@ -186,6 +186,9 @@
   at 90 s, every 120 s) reached sample 4 (>= 7.5 min up), most threads at pc 0x20e955030 (waiting).
   bluetoothd / fairplayd.H2 respawn in a loop via xpcproxy (as on sweet). Footer total=0x4795 seq=7, no
   "SWEET LOG: write failed". Likely just slow: 1 CPU (an A510) vs sweet's 6 (README: ~4 min on the logo).
+- **Boot x9s (kernel out-dm3q-005 = 0100 v2 + 0101 + 0102 + 0103; cmdline cpus=8 sweetfb_fill=1
+  sweetfb_noconsole=1, no -enable_kprintf_spam): user reports the Apple logo FULL SCREEN** -> SMP with 8
+  cores boots (GICR stride fix) and the x32/25 scaling works. Fallback image dm3q-x9 (cpus=1).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
