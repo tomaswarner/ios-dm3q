@@ -121,6 +121,10 @@
   ready)**, HW ver 0x50000000, HCE 1, TX FSM = HIBERN8 (1), DME_VS_CORE_CLK_CTRL 0x012C0000 + 40ns + LCC off all
   rc 0. Link startup: rc 0xFE (UCRDY low, HCS 0), IS 0x4 UE, UECPA 0x80000010 (PA LINE-RESET indication: the
   freshly reset device). ufs8: uic() acks UE while waiting for UCRDY, IS cleared before, 5 link startup tries.
+- **ufs8 result (IMG_5735):** pre-link clean (HCS 0x08, IS 0, UEC 0); DME_LINKSTARTUP -> no completion (0xFF),
+  then IS UE and **HCS 0** (UCRDY gone) for all retries. Suspect GCC UFS symbol clock muxes left on TCXO by ABL's
+  power-down: rx0 0x77064, rx1 0x770e0, tx0 0x77054 (gcc base 0x100000; 0 = PHY symbol clk, 2 = TCXO; Linux
+  gcc-sm8550 parent maps 10/11/12). ufs9 prints them, sets 0 after PHY power-on, enables rx0/rx1/tx0 CBCRs.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
