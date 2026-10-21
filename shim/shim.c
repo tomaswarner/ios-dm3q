@@ -76,6 +76,11 @@ static inline void wr32(uintptr_t a, uint32_t v)
 extern char secondary_entry[];
 
 static const char *stage;	/* set at runtime: no absolute pointers in data */
+
+void stage_str(const char *s)
+{
+	stage = s;
+}
 static volatile uint64_t sec_mpidr[NR_CPUS];
 static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
 static volatile uint32_t irq_count, irq_other, irq_last;
@@ -411,7 +416,7 @@ void shim_main(uint64_t dtb)
 	test_gic();
 	con_skip();
 	stage = "ufs";
-	test_ufs();
+	test_ufs_dm3q();
 	con_skip();
 	/* Keep the results on screen; no reset (the photo is the output). */
 	con_str("DONE", "hold; photograph this screen");

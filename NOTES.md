@@ -50,6 +50,14 @@
   xnu uses CNTV_TVAL/CNTVCT like the shim. Patch **0100-dm3q-timer-heartbeat**: the timer IRQ redraws
   `HB n= pc= lr= m= t=` once a second in the bottom band (sweet_early_status), to see whether timer IRQs
   arrive inside xnu and where the CPU is.
+- **Boot x3 (heartbeat, IMG_5722/5723): xnu reaches the root mount.** IORTC 30 s wait completes (screen frozen
+  ~15-45 s, then new lines at the TOP: console wraps), mbinit, network (lo0/gif0/stf0), then
+  `SWEET UFS: command 0x00 timed out` x3 -> `panic: IOFindBSDRoot: SWEET UFS root ufsroot0 unavailable: 60`
+  (caller IOFindBSDRoot+0xd2c). x2 most likely did the same (new lines appear at the top). Heartbeat after
+  the panic: pc/lr = ml_set_interrupts_enabled_with_debug, n=0xc69d6 at t=0x3a (count inflated post-panic?).
+  **Blocker now: UFS commands never complete.** Probe `shim/out/dm3q-ufs1-boot.img` (`test_ufs_dm3q`): UEC
+  error regs, DME_GET PA_PWRMode/TxGear/RxGear/lanes, NOP OUT + TUR with own buffers, DME_HIBERNATE_EXIT,
+  retry, then buffers in ABL's UTRL page, then apps-smmu (0x15000000) SMR/S2CR/CB for SID 0x60.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
