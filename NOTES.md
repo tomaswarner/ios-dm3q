@@ -205,6 +205,14 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **metal2vulkan vs the real iOS 16 shaders (lavapipe profile, 2026-10-21):** `tools/metallib-ls.py` lists MTLB
+  functions. QuartzCore default.metallib (39 vertex, 95 fragment, 7 kernel) and CoreImage default.metallib
+  (58 kernels): 115/141 and 55/58 translate to SPIR-V; every other one only asks for runtime pipeline input
+  (vertex descriptor, function constants, tile/extra color attachments) - 0 translator gaps. Fragments were
+  paired with their vertex shader by brute force (`tools/m2v-pair-qc.sh`, 89/95). Metal API surface:
+  QuartzCore references 189 and CoreImage 147 of the 1432 selectors AGXMetalA11 implements (incl. SPI:
+  iosurface textures, encodeCacheHint*, finalize/initializeTextureMemory, commitAndWaitUntilSubmitted).
+  Lists in /private/tmp/claude-501/gpu-research/*-metal-sels.txt. metal2vulkan cloned in third_party/ (not git).
 - **Metal plan revised after prior-art search (2026-10-21):** github.com/steelbrain/metal2vulkan (Rust, 287*, active,
   GPL/LGPL): metallib/AIR front end -> SPIR-V per stage + a Metal API runtime on Vulkan (docs/RUNTIME-PORTING.md,
   METAL-COVERAGE.md; built for a paravirtualized GPU wrapping Metal, covers some Apple SPI). Stack: iOS app ->
