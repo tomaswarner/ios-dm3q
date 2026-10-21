@@ -3,6 +3,9 @@
  * enums cross to sweetmetal as their raw values. */
 #import "SweetMetalPrivate.h"
 #import <IOSurface/IOSurfaceRef.h>
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 /* ---- textures ----------------------------------------------------------------------------- */
@@ -18,6 +21,7 @@
 	sm_buffer *_backing;     /* IOSurface bytes, for a surface's texture */
 	IOSurfaceRef _surface;
 	NSUInteger _plane;
+	id<MTLBuffer> _buffer;   /* the buffer a buffer texture's texels are */
 }
 @synthesize label;
 
@@ -30,6 +34,9 @@
 	}
 	return self;
 }
+
+- (void)setBackingBuffer:(id<MTLBuffer>)b { _buffer = b; }
+- (id<MTLBuffer>)buffer { return _buffer; }
 
 - (void)setSurface:(IOSurfaceRef)s plane:(NSUInteger)plane backing:(sm_buffer *)b
 {
@@ -68,7 +75,6 @@
 - (uint64_t)protectionOptions { return 0; }
 - (NSUInteger)iosurfacePlane { return _plane; }
 - (id<MTLTexture>)parentTexture { return nil; }
-- (id<MTLBuffer>)buffer { return nil; }
 - (id<MTLResource>)rootResource { return nil; }
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)allocatedSize { return 0; }
@@ -179,11 +185,25 @@ MISSING_LOGGER
 
 /* ---- device: resources, states, pipelines ------------------------------------------------- */
 
+/* A no-copy buffer's pages: Apple's GPU wires them when the buffer is made, so CoreAnimation
+ * unmaps its range as soon as it releases the buffer, while a command buffer still queued may
+ * read them. lavapipe reads the CPU mapping, so the runtime gets its own mapping of the same pages
+ * (mach_vm_remap, shared, not copied): writes through either show in both, and the pages stay until
+ * the runtime is done with them and runs this deallocator. */
+struct nocopy {
+	void *client;      /* the caller's pointer: what -contents answers and its deallocator gets */
+	void (^deallocator)(void *, NSUInteger);
+};
+
 static void run_deallocator(void *bytes, uint64_t length, void *ctx)
 {
-	void (^block)(void *, NSUInteger) = (__bridge_transfer void (^)(void *, NSUInteger))ctx;
-	if (block)
-		block(bytes, (NSUInteger)length);
+	struct nocopy *nc = ctx;
+	SMTRACE("deallocator %p (ours %p) %llu bytes", nc->client, bytes, (unsigned long long)length);
+	vm_deallocate(mach_task_self(), (vm_address_t)bytes, (vm_size_t)length);
+	if (nc->deallocator)
+		nc->deallocator(nc->client, (NSUInteger)length);
+	nc->deallocator = nil;
+	free(nc);
 }
 
 static void release_surface(void *bytes, uint64_t length, void *ctx)
@@ -223,15 +243,30 @@ static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
 - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options
 			      deallocator:(void (^)(void *pointer, NSUInteger length))deallocator
 {
-	void *ctx = deallocator ? (__bridge_retained void *)[deallocator copy] : NULL;
-	sm_buffer *b = sm_buffer_new_no_copy(self.sm, pointer, length, options, ctx ? run_deallocator : NULL, ctx);
-	if (!b) {
-		sm_error(@"newBufferWithBytesNoCopy");
-		if (ctx)
-			CFRelease(ctx);
+	vm_address_t ours = 0;
+	vm_prot_t cur, max;
+	kern_return_t kr = vm_remap(mach_task_self(), &ours, length, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+					 (vm_address_t)pointer, FALSE, &cur, &max, VM_INHERIT_NONE);
+	SMTRACE("no-copy buffer %p %lu bytes, deallocator %s, remap %p kr %d", pointer, (unsigned long)length,
+		deallocator ? "yes" : "no", (void *)(uintptr_t)ours, kr);
+	if (kr != KERN_SUCCESS) {
+		sm_error([NSString stringWithFormat:@"newBufferWithBytesNoCopy: mach_vm_remap %d", kr]);
 		return nil;
 	}
-	return [[SweetMTLBuffer alloc] initWithDevice:self buffer:b options:options];
+	struct nocopy *nc = calloc(1, sizeof *nc);
+	nc->client = pointer;
+	nc->deallocator = [deallocator copy];
+	sm_buffer *b = sm_buffer_new_no_copy(self.sm, (void *)(uintptr_t)ours, length, options, run_deallocator, nc);
+	if (!b) {
+		sm_error(@"newBufferWithBytesNoCopy");
+		vm_deallocate(mach_task_self(), ours, length);
+		nc->deallocator = nil;
+		free(nc);
+		return nil;
+	}
+	SweetMTLBuffer *buf = [[SweetMTLBuffer alloc] initWithDevice:self buffer:b options:options];
+	buf.clientContents = pointer;
+	return buf;
 }
 
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
@@ -257,6 +292,12 @@ static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
 	uint8_t *base = IOSurfaceGetBaseAddress(s);
 	uint64_t offset = planes ? (uint64_t)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, plane) - base) : 0;
 	uint64_t bpr = planes ? IOSurfaceGetBytesPerRowOfPlane(s, plane) : IOSurfaceGetBytesPerRow(s);
+	/* The port's kernel IOSurface (xnu 0046) keeps no per-plane facts: plane 0 of such a surface is
+	 * its base with the surface's own row pitch. */
+	if (bpr == 0 && plane == 0) {
+		bpr = IOSurfaceGetBytesPerRow(s);
+		offset = 0;
+	}
 	size_t page = (size_t)getpagesize();
 	uint64_t len = (IOSurfaceGetAllocSize(s) + page - 1) & ~(uint64_t)(page - 1);
 	CFRetain(s);
@@ -727,6 +768,35 @@ MISSING_LOGGER
 - (void)pushDebugGroup:(NSString *)string { }
 - (void)popDebugGroup { }
 MISSING_LOGGER
+@end
+
+/* ---- buffers: textures over their bytes --------------------------------------------------- */
+
+@implementation SweetMTLBuffer (Textures)
+
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bpr
+{
+	sm_texture_desc td = texture_desc(d);
+	SMTRACE("buffer texture %lux%lu fmt %lu over buffer %lu bytes at %lu, %lu per row (needs %lu)", (unsigned long)d.width,
+		(unsigned long)d.height, (unsigned long)d.pixelFormat, (unsigned long)self.length, (unsigned long)offset,
+		(unsigned long)bpr, (unsigned long)(offset + bpr * d.height));
+	sm_texture *t = sm_buffer_new_texture(self.sm, &td, offset, bpr);
+	if (!t) {
+		sm_error(@"buffer newTextureWithDescriptor");
+		return nil;
+	}
+	SweetMTLTexture *tex = [[SweetMTLTexture alloc] initWithDevice:self.device texture:t descriptor:d];
+	[tex setBackingBuffer:self];
+	return tex;
+}
+
+/* SPI: the same with an image stride (one 2D image here) */
+- (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset
+				     bytesPerRow:(NSUInteger)bpr bytesPerImage:(NSUInteger)bpi
+{
+	return [self newTextureWithDescriptor:d offset:offset bytesPerRow:bpr];
+}
+
 @end
 
 /* ---- compute encoder: textures and samplers ---------------------------------------------- */

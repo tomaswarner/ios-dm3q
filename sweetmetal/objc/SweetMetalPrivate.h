@@ -70,6 +70,7 @@ static inline uint32_t sm_pixel_format(MTLPixelFormat f)
 
 @interface SweetMTLBuffer : NSObject <MTLBuffer>
 @property (readonly) sm_buffer *sm;
+@property void *clientContents;   /* a no-copy buffer's caller pointer (-contents answers it) */
 - (instancetype)initWithDevice:(id<MTLDevice>)device buffer:(sm_buffer *)b options:(MTLResourceOptions)options;
 @end
 

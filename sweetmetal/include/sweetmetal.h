@@ -85,6 +85,8 @@ void sm_texture_release(sm_texture *t);
 typedef void (*sm_deallocator)(void *bytes, uint64_t length, void *ctx);
 sm_buffer *sm_buffer_new_no_copy(const sm_device *dev, void *bytes, uint64_t length, uint64_t options,
 				 sm_deallocator dealloc, void *ctx);
+/* -[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:] */
+sm_texture *sm_buffer_new_texture(const sm_buffer *b, const sm_texture_desc *d, uint64_t offset, uint64_t bytes_per_row);
 /* newTextureWithDescriptor:iosurface:plane: over a no-copy buffer of the surface's bytes:
  * offset/bytes_per_row of the plane (0 / IOSurfaceGetBytesPerRow without planes). */
 sm_texture *sm_texture_new_iosurface(const sm_buffer *surface, const sm_texture_desc *d, uint64_t offset,

@@ -148,6 +148,19 @@ pub unsafe extern "C" fn sm_texture_new_iosurface_facts(
     boxed((*buf).new_texture_with_iosurface_plane(&td, plane))
 }
 
+/// `-[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]`: a texture over the buffer's bytes.
+#[no_mangle]
+pub unsafe extern "C" fn sm_buffer_new_texture(
+    buf: *const Buffer, d: *const SmTextureDesc, offset: u64, bytes_per_row: u64,
+) -> *mut Texture {
+    if buf.is_null() || d.is_null() {
+        set_error("null argument");
+        return ptr::null_mut();
+    }
+    let Some(td) = texture_descriptor(&*d) else { return ptr::null_mut() };
+    boxed((*buf).new_texture(&td, offset, bytes_per_row))
+}
+
 /// `newBufferWithBytesNoCopy:length:options:deallocator:` callback: `(pointer, length, ctx)`.
 pub type SmDeallocator = Option<unsafe extern "C" fn(*mut u8, u64, *mut c_void)>;
 

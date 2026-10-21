@@ -13,6 +13,8 @@
  * (SWEETMETAL missing: ...) before the usual exception, to drive what comes next. */
 #import "SweetMetalPrivate.h"
 #import <objc/runtime.h>
+#include <mach-o/dyld.h>
+#include <unistd.h>
 
 BOOL sm_strict(void)
 {
@@ -29,7 +31,7 @@ BOOL sm_trace(void)
 	static int trace = -1;
 	if (trace < 0) {
 		const char *v = getenv("SWEETMETAL_TRACE");
-		trace = v && *v == '1';
+		trace = (v && *v == '1') || access("/var/tmp/sweetmetal_trace", F_OK) == 0;
 	}
 	return trace;
 }
@@ -84,12 +86,13 @@ NSError *sm_error(NSString *what)
 
 - (void)dealloc
 {
+	SMTRACE("release buffer %p %lu bytes", sm_buffer_contents(_sm), (unsigned long)sm_buffer_length(_sm));
 	sm_buffer_release(_sm);
 }
 
 - (id<MTLDevice>)device { return _device; }
 - (NSUInteger)length { return (NSUInteger)sm_buffer_length(_sm); }
-- (void *)contents { return sm_buffer_contents(_sm); }
+- (void *)contents { return _clientContents ?: sm_buffer_contents(_sm); }
 - (void)didModifyRange:(NSRange)range { }
 - (MTLResourceOptions)resourceOptions { return _options; }
 - (MTLCPUCacheMode)cpuCacheMode { return (MTLCPUCacheMode)(_options & 0xf); }
@@ -482,6 +485,12 @@ MISSING_LOGGER
 	_air = [NSMutableDictionary dictionary];
 	_pipelines = [NSMutableDictionary dictionary];
 	SMLOG("device up: %s, accelerator port %u", _name.UTF8String, port);
+	/* load addresses, to symbolize crash backtraces from the kernel log */
+	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+		const char *n = _dyld_get_image_name(i);
+		if (strstr(n, "SweetMetal") || strstr(n, "vulkan"))
+			SMLOG("image %p %s", (void *)_dyld_get_image_header(i), n);
+	}
 	return self;
 }
 

@@ -13,6 +13,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 @interface NSObject (SweetMetalProbe)
 - (id)initWithAcceleratorPort:(unsigned int)port;
@@ -384,6 +385,34 @@ static void specialized(id<MTLDevice> dev, id<MTLLibrary> lib, id<MTLCommandQueu
 	failures += good != 64;
 }
 
+/* CoreAnimation's no-copy pattern: write after making the buffer, commit a copy out of it,
+ * release the buffer and munmap the pages before the GPU is done; the copy must still read them. */
+static void nocopy_unmap(id<MTLDevice> dev)
+{
+	size_t len = 4 * 16384;
+	uint32_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	id<MTLBuffer> src = [dev newBufferWithBytesNoCopy:mem length:len options:0 deallocator:nil];
+	for (size_t i = 0; i < len / 4; i++)
+		mem[i] = (uint32_t)i * 7;
+	check(src.contents == mem, "no-copy contents is the caller's pointer", nil);
+	id<MTLBuffer> dst = [dev newBufferWithLength:len options:0];
+	id<MTLCommandQueue> q = [dev newCommandQueue];
+	id<MTLCommandBuffer> cb = [q commandBuffer];
+	id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+	[e copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:0 size:len];
+	[e endEncoding];
+	[cb commit];
+	src = nil;
+	munmap(mem, len);
+	[cb waitUntilCompleted];
+	int good = 0;
+	for (size_t i = 0; i < len / 4; i++)
+		good += ((uint32_t *)dst.contents)[i] == (uint32_t)i * 7;
+	printf("%s no-copy buffer read after the caller's munmap: %d/%zu words\n", good == (int)(len / 4) ? "ok  " : "FAIL",
+	       good, len / 4);
+	failures += good != (int)(len / 4);
+}
+
 int main(int argc, char **argv)
 {
 	@autoreleasepool {
@@ -422,8 +451,9 @@ int main(int argc, char **argv)
 			printf("skip  %s (no test metallib)\n", testlib);
 		/* an unimplemented selector: logged and answered nil (not SWEETMETAL_STRICT) */
 		id<MTLBuffer> b = [dev newBufferWithLength:4096 options:0];
-		id<MTLTexture> none = [b newTextureWithDescriptor:[MTLTextureDescriptor new] offset:0 bytesPerRow:64];
+		id none = [(id)b performSelector:NSSelectorFromString(@"sweetNoSuchMethod")];
 		check(none == nil, "missing selector answered nil", nil);
+		nocopy_unmap(dev);
 		printf(failures ? "MTL_PROBE FAIL (%d)\n" : "MTL_PROBE OK\n", failures);
 		return failures != 0;
 	}
