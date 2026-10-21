@@ -794,6 +794,23 @@ void test_ufs_linux(void)
 	uint32_t phy = ufsphy_power_on();
 	uint32_t hwv = ufs_rd(REG_UFS_HW_VERSION);
 	con_hex2("PHY", "rc=", phy, "hwver=", hwv);
+	/*
+	 * Lane symbol clocks come from the PHY: point the GCC muxes at it (Linux
+	 * gcc-sm8550 parent maps 10/11/12: 0 = PHY symbol clk, 2 = TCXO) and enable
+	 * the branches. ABL's UFS power-down may leave them on TCXO (dm3q ufs8).
+	 */
+	stage_str("ufs symbol clk");
+	uint32_t mrx0 = mmio_rd(GCC_BASE + 0x77064), mrx1 = mmio_rd(GCC_BASE + 0x770e0);
+	uint32_t mtx0 = mmio_rd(GCC_BASE + 0x77054);
+	mmio_wr(GCC_BASE + 0x77064, mrx0 & ~3u);
+	mmio_wr(GCC_BASE + 0x770e0, mrx1 & ~3u);
+	mmio_wr(GCC_BASE + 0x77054, mtx0 & ~3u);
+	static const uint32_t sym[] = { 0x7702c, 0x770cc, 0x77028 };	/* rx0, rx1, tx0 CBCR */
+	for (int i = 0; i < 3; i++)
+		mmio_wr(GCC_BASE + sym[i], mmio_rd(GCC_BASE + sym[i]) | CBCR_CLK_EN);
+	udelay(100);
+	con_hex2("SYMMUX", "rx0/rx1=", mrx0 << 16 | (mrx1 & 0xffff), "tx0=", mtx0);
+	con_hex2("SYMCLK", "rx0=", mmio_rd(GCC_BASE + 0x7702c), "tx0=", mmio_rd(GCC_BASE + 0x77028));
 	ufs_wr(REG_UFS_CFG1, ufs_rd(REG_UFS_CFG1) | 1);			/* QUNIPRO_SEL */
 	if ((hwv >> 28) >= 5)
 		ufs_wr(REG_UFS_CFG0, ufs_rd(REG_UFS_CFG0) & ~(1u << 5));	/* QUNIPRO_G4_SEL off */
@@ -839,6 +856,7 @@ void test_ufs_linux(void)
 		}
 	}
 	con_hex2("LINKUP", "is=", ufs_rd(REG_IS), "uecpa=", ufs_rd(REG_UECPA));
+	con_hex2("LINKUP", "hce=", ufs_rd(REG_HCE), "pcsrdy=", ufsphy_ready_status());
 	if (rc || !(ufs_rd(REG_HCS) & HCS_DP)) {
 		con_str("UFS", "link startup failed / no device");
 		return;
