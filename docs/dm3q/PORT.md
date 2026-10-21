@@ -132,4 +132,4 @@ Arrancó a la primera: Samsung ABL acepta el boot v4 con nuestro `Image` (vbmeta
 - GICD: TYPER 0x016B001F (1024 INTIDs, LPIs), IIDR 0x47000070 (no es el GIC-600 de ARM → **vGIC emulado por
   Gunyah**), CTLR 0xD0 (**DS=1: un solo estado de seguridad**, ARE), PIDR2 → GICv3.
 - GICR: 8 frames con stride 0x40000, afinidades 0x000…0x700 = MPIDR del DT, último frame marca Last.
-- UPTIME llegó al menos a 45 s sin reinicio (ver handoff para el resultado final del watchdog).
+- UPTIME sigue contando (varios minutos, confirmado por el usuario): **ni Gunyah ni el ABL dejan un watchdog armado** que reinicie una VM que no lo atiende.

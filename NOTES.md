@@ -15,10 +15,11 @@
   Diagnostic shim `shim/diag.c` + `shim/build-diag.sh` (no XNU; screen calibration, EL/CPU ids,
   /memory banks from ABL's DTB, PSCI/SMCCC, hypervisor UID, GIC ids, uptime until reset).
   Host render: `cc -DDIAG_HOST -o out/diag_host diag_host.c diag.c console.c` (checked against the real DTB).
-- **Not tested on hardware.** Bootloader still locked. Next: OEM unlock (wipe, Knox), flash
-  `dm3q-vbmeta-disabled.tar` + `dm3q-diag-boot.tar`, photograph the screen, then fix RAM base/size in
-  `tools/mkadt.py`. Still TODO before XNU: `shim/build.sh` header v4, `mmu.c` maps only 0-8 GiB (DRAM is
-  at 0x8_80000000+), Gunyah watchdog, UFS behind SMMU (SID 0x60), touch = STM FTS over GENI SPI.
+- **Diag v1 booted on the phone (2026-10-20)** after OEM unlock: results in `docs/dm3q/PORT.md` (FB live
+  1440x3088 RGB, EL1, Gunyah vGIC DS=1, 8 DRAM banks; no watchdog reset after minutes). Flashed with
+  `tools/samloader-rs/samloader flash -p VBMETA vbmeta.img -p BOOT boot.img` (PIT: BOOT, VBMETA).
+  Back to Android: flash `fw-DYDC/img/boot.img` to BOOT. mkadt highmem now 0x8c0000000 + 0xfcc00000. Still TODO before XNU: `shim/build.sh` header v4 (mmu.c upper bank + v4 payload scan done; DRAM is
+  at 0x8_80000000+), UFS behind SMMU (SID 0x60), touch = STM FTS over GENI SPI.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
