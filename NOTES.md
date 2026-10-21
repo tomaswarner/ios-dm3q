@@ -58,6 +58,13 @@
   **Blocker now: UFS commands never complete.** Probe `shim/out/dm3q-ufs1-boot.img` (`test_ufs_dm3q`): UEC
   error regs, DME_GET PA_PWRMode/TxGear/RxGear/lanes, NOP OUT + TUR with own buffers, DME_HIBERNATE_EXIT,
   retry, then buffers in ABL's UTRL page, then apps-smmu (0x15000000) SMR/S2CR/CB for SID 0x60.
+- **ufs1 result (IMG_5724):** UEC all 0; PA_PWRMode 0x11 (FAST), Tx/Rx HS-G5, 2 lanes: link fully up.
+  NOP OUT and TUR time out with own buffers, after DME_HIBERNATE_EXIT (rc 0, then IS=0x4 UIC error) and with
+  buffers in ABL's UTRL page (ABL UTRLBA 0xC70EF000 this boot). apps-smmu CR0 0x002E0406, IDR0 0x4C017E69,
+  105 SMRs; SMR0 = 0x80000060 (SID 0x60) -> S2CR translate CB0; CB0 SCTLR 0x0A9F00E0 (M=0: bypass), FSR
+  0x400 (format only, no fault). => not an SMMU S1 block, not Hibern8. Next suspicion: ABL gated the UFS AXI
+  (DMA) / ICE clocks at exit. Probe `shim/out/dm3q-ufs2-boot.img`: GCC CBCRs (axi 0x77018, ice 0x77074,
+  unipro 0x77068, ahb 0x77024, aux 0x770b0, rx/tx symbols) + GDSCs 0x77004/0x9e000, enable the off ones, retry.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
