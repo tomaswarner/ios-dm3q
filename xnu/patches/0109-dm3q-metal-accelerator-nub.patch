@@ -1,0 +1,81 @@
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -17,6 +17,7 @@
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
++iokit/Kernel/arm/SweetAccelerator.cpp                            optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -82,6 +82,11 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++    "   {"
++    "     'IOClass'         = IOAcceleratorES;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IOAcceleratorES;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -0,0 +1,54 @@
++/*
++ * DM3Q Metal device nub (boot-arg sweetmetal=1).
++ *
++ * Metal's _MTLRegisterDevices (iOS 16.7) walks IOServiceMatching("IOAcceleratorES") and, per
++ * service, loads /System/Library/Extensions/<MetalPluginName>.bundle, takes the class named
++ * MetalPluginClassName (a subclass of _MTLDevice) and calls initWithAcceleratorPort:. Our
++ * SweetMetal.bundle (Metal over metal2vulkan and Vulkan, CPU lavapipe for now) needs nothing
++ * else from the kernel, so this service only publishes those two properties; it has no user
++ * client (IOServiceOpen fails, which EAGL treats as no accelerator).
++ *
++ * Without the boot-arg start() fails and the registry has no IOAcceleratorES, as before:
++ * CoreAnimation and CoreImage keep their non-Metal paths.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++
++class IOAcceleratorES : public IOService {
++	OSDeclareDefaultStructors(IOAcceleratorES);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
++bool
++IOAcceleratorES::start(IOService *provider)
++{
++	uint32_t on = 0;
++	char plugin[64] = "SweetMetal";
++	char cls[64] = "SweetMTLDevice";
++
++	if (!PE_parse_boot_argn("sweetmetal", &on, sizeof(on)) || on == 0) {
++		return false;
++	}
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	/* sweetmetal_plugin= / sweetmetal_class= override the bundle and class (tests). */
++	PE_parse_boot_argn("sweetmetal_plugin", plugin, sizeof(plugin));
++	PE_parse_boot_argn("sweetmetal_class", cls, sizeof(cls));
++	setProperty("MetalPluginName", plugin);
++	setProperty("MetalPluginClassName", cls);
++	setProperty("MetalStatisticsName", plugin);
++	registerService();
++	IOLog("SWEET METAL: IOAcceleratorES registered (MetalPluginName %s, MetalPluginClassName %s)\n",
++	    plugin, cls);
++	return true;
++}
++#endif /* SWEET */
