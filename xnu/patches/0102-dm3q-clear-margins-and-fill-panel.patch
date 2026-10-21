@@ -1,0 +1,110 @@
+diff -ruN a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-21 00:20:49
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-21 00:20:49
+@@ -111,6 +111,9 @@
+ 	OSArray      *fClients;
+ 	uint32_t      fSwapID;
+ 	bool          fConsolePaused;
++	bool          fFill;            /* DM3Q: scale the logical display to fill the panel */
++	void          presentScaled(SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
++	    int32_t dx, int32_t dy, int32_t w, int32_t h);
+ 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+ 	bool          fDirty;
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+@@ -314,7 +317,68 @@
+ 	}
+ }
+ 
++/*
++ * DM3Q (boot-arg sweetfb_fill=1): nearest-neighbour scale of one layer from
++ * logical (iPhone X) coordinates to the panel by fWidth / fLogicalW (1440/1125
++ * = 32/25), centred vertically (3118 -> 3088 rows: ~15 cropped at each end).
++ * Panel rows that map to the same source row are copied from the row above.
++ */
+ void
++AppleCLCD::presentScaled(SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
++    int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	const int64_t num = fWidth, den = fLogicalW;
++	const int64_t cropY = ((int64_t)fLogicalH * num / den - fHeight) / 2;
++	if (w > (int32_t)s->width - sx) {
++		w = (int32_t)s->width - sx;
++	}
++	if (h > (int32_t)s->height - sy) {
++		h = (int32_t)s->height - sy;
++	}
++	if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 || s->memory == NULL ||
++	    (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow + (uint64_t)(sx + w) * 4 >
++	    s->memory->getLength()) {
++		return;
++	}
++	int64_t px0 = dx * num / den, px1 = ((int64_t)(dx + w) * num + den - 1) / den;
++	int64_t py0 = dy * num / den - cropY, py1 = ((int64_t)(dy + h) * num + den - 1) / den - cropY;
++	if (px1 > (int64_t)fWidth) {
++		px1 = fWidth;
++	}
++	if (py0 < 0) {
++		py0 = 0;
++	}
++	if (py1 > (int64_t)fHeight) {
++		py1 = fHeight;
++	}
++	int64_t prev = -1;
++	for (int64_t py = py0; py < py1; py++) {
++		int64_t ly = (py + cropY) * den / num;
++		if (ly < dy || ly >= dy + h) {
++			continue;
++		}
++		uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
++		if (ly == prev && py > py0) {
++			memcpy(drow + px0, (const void *)(fPixels + (uint64_t)(py - 1) * fRowBytes + px0 * 4),
++			    (size_t)(px1 - px0) * 4);
++			continue;
++		}
++		prev = ly;
++		const uint32_t *srow = (const uint32_t *)(src + s->offset +
++		    (uint64_t)(sy + ly - dy) * s->bytesPerRow) + sx - dx;
++		for (int64_t px = px0; px < px1; px++) {
++			int64_t lx = px * den / num;
++			if (lx >= dx + w) {
++				break;
++			}
++			if (lx >= dx) {
++				drow[px] = srow[lx];
++			}
++		}
++	}
++}
++
++void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+@@ -327,7 +391,15 @@
+ 			/* Not PE_initialize_console(kPEDisableScreen): its console switch
+ 			 * writes the read-only-late cons_ops_index and panics. */
+ 			sweet_console_muted = 1;
++			/* DM3Q: the GUI only repaints its own rectangle; blank the old
++			 * console text around it once */
++			for (uint32_t y = 0; y < fHeight; y++) {
++				bzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fWidth * 4);
++			}
+ 		}
++		int fill = 0;
++		fFill = PE_parse_boot_argn("sweetfb_fill", &fill, sizeof(fill)) && fill != 0 &&
++		    fWidth > fLogicalW;
+ 	}
+ 
+ 	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+@@ -364,6 +436,11 @@
+ 		}
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
++		}
++		if (fFill && bpe == 4) {
++			presentScaled(s, src, sx, sy, dx, dy, w, h);
++			s->release();
++			continue;
+ 		}
+ 		/* Logical (presented) display coordinates -> panel coordinates. */
+ 		dx -= fOffX;

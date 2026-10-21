@@ -175,6 +175,10 @@
   only repaints its rectangle) and the heartbeat band is still drawn. TODO: blank the margins on the first
   present, drop/disable the heartbeat, CPU upscale x1.28 to fill the panel, then touch (STM FTS over GENI
   SPI @0xa90000, S2DOS05 rails) and keys (PMK8550 PON, PM8550 GPIO6) for interaction.
+- **Patches 0102 + 0100 v2:** AppleCLCD blanks the whole panel at the first present (with sweetfb_noconsole) and,
+  with boot-arg `sweetfb_fill=1`, scales layers x fWidth/fLogicalW (32/25) nearest-neighbour, vertically
+  centred (~15 rows cropped each end), duplicate rows memcpy'd. Heartbeat now off unless `sweethb=1`.
+  GUI boots also drop `-enable_kprintf_spam` (kprintf bypasses the console mute and draws over the GUI).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

@@ -1,12 +1,13 @@
 diff -ruN a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 --- a/osfmk/arm64/sleh.c	2026-10-20 22:16:56
-+++ b/osfmk/arm64/sleh.c	2026-10-20 22:17:16
-@@ -1847,6 +1847,50 @@
++++ b/osfmk/arm64/sleh.c	2026-10-21 00:21:24
+@@ -1847,6 +1847,60 @@
  	__builtin_unreachable();
  }
  
 +#if defined(SWEET)
 +#include <arm64/sweet_early.h>
++#include <pexpert/pexpert.h>
 +
 +/*
 + * DM3Q bring-up heartbeat: once a second the timer IRQ redraws
@@ -32,6 +33,15 @@ diff -ruN a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 +static void
 +sweet_heartbeat(arm_saved_state_t *state)
 +{
++	static int sweet_hb_on = -1;     /* boot-arg sweethb=1; off by default (draws over the GUI) */
++	if (sweet_hb_on < 0) {
++		int v = 0;
++		PE_parse_boot_argn("sweethb", &v, sizeof(v));
++		sweet_hb_on = v;
++	}
++	if (!sweet_hb_on) {
++		return;
++	}
 +	uint64_t now = ml_get_timebase();
 +	sweet_hb_count++;
 +	if (now - sweet_hb_last < 19200000ULL) {     /* 1 s at 19.2 MHz */
@@ -52,7 +62,7 @@ diff -ruN a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
  void
  sleh_irq(arm_saved_state_t *state)
  {
-@@ -1868,6 +1912,7 @@
+@@ -1868,6 +1922,7 @@
  		return; /* spurious */
  	}
  	if (intid == sweet_vtimer_intid) {
