@@ -113,11 +113,256 @@ static void cs(int high)
 	wr(io, (rd(io) & ~2u) | (high ? 2u : 0u));
 }
 
+
+/*
+ * GPI DMA (GSI) for SE4: dm3q reads GENI_IF_DISABLE_RO = 1 (FIFO interface
+ * fused off), so SPI only runs through gpi_dma1 (touch2-4 probes).  Minimal
+ * polled port of Linux drivers/dma/qcom/gpi.c + spi-geni-qcom.c setup_gsi_xfer:
+ * one GPII, TX chan 0 / RX chan 1, one event ring, no interrupts.
+ */
+#define GPI_EE		0x009f0000UL	/* gpi-dma@a00000 minus ee offset 0x10000 (upstream sm8550 match data) */
+#define GPII		1		/* gpii-mask 0x1e: HLOS owns 1-4 */
+#define GPI_SEID	4
+#define GPI_PROTO_SPI	1
+#define GPII_OFF	(0x4000UL * GPII)
+#define CH_CNTXT(k)	(GPI_EE + 0x20000 + GPII_OFF + 0x80 * (k))
+#define CH_QOS(k)	(CH_CNTXT(k) + 0x5c)
+#define CH_SCRATCH(k)	(CH_CNTXT(k) + 0x60)
+#define EV_CNTXT	(GPI_EE + 0x21000 + GPII_OFF)
+#define CH_DB(k)	(GPI_EE + 0x22000 + GPII_OFF + 0x8 * (k))
+#define EV_DB		(GPI_EE + 0x22100 + GPII_OFF)
+#define CH_CMD		(GPI_EE + 0x23008 + GPII_OFF)
+#define EV_CMD		(GPI_EE + 0x23010 + GPII_OFF)
+#define CNTXT_TYPE_IRQ	(GPI_EE + 0x23080 + GPII_OFF)
+#define SRC_CH_IRQ	(GPI_EE + 0x23090 + GPII_OFF)
+#define SRC_EV_IRQ	(GPI_EE + 0x23094 + GPII_OFF)
+#define SRC_CH_IRQ_CLR	(GPI_EE + 0x230a0 + GPII_OFF)
+#define SRC_EV_IRQ_CLR	(GPI_EE + 0x230a4 + GPII_OFF)
+#define SRC_IEOB_CLR	(GPI_EE + 0x230c0 + GPII_OFF)
+#define GLOB_IRQ_STTS	(GPI_EE + 0x23100 + GPII_OFF)
+#define GPII_ERR	(GPI_EE + 0x23200 + GPII_OFF)
+
+#define CMD_ALLOC	0
+#define CMD_START	1
+#define CMD_STOP	2
+#define CMD_RESET	9
+#define CMD_DEALLOC	10
+
+#define TRE_DMA		0x10u
+#define TRE_GO		0x20u
+#define TRE_CONFIG0	0x22u
+#define TF_CHAIN	(1u << 0)
+#define TF_IEOT		(1u << 9)
+#define TF_LINK		(1u << 11)
+#define EV_XFER_COMPL	0x22u
+
+#define CH_EL		64
+#define EV_EL		128
+static uint32_t ch_ring[2][CH_EL * 4] __attribute__((aligned(CH_EL * 16)));
+static uint32_t ev_ring[EV_EL * 4] __attribute__((aligned(EV_EL * 16)));
+static uint8_t dma_tx[64] __attribute__((aligned(64))), dma_rx[64] __attribute__((aligned(64)));
+static unsigned ch_wp[2], ev_rp;
+static uint32_t gpi_last_ev[4], gpi_err_info, gpi_events;
+
+static void dcache_flush(const void *p, unsigned n)	/* clean+invalidate (no-op effect with the MMU off) */
+{
+	for (uintptr_t a = (uintptr_t)p & ~63ul; a < (uintptr_t)p + n; a += 64)
+		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+	__asm__ volatile("dsb sy" : : : "memory");
+}
+
+static uint32_t ch_state(int k) { return (rd(CH_CNTXT(k)) >> 20) & 0xf; }
+static uint32_t ev_state(void) { return (rd(EV_CNTXT) >> 20) & 0xf; }
+
+/* channel/event command; completion = context state reaching want (or just time when want < 0) */
+static int gpi_cmd(uintptr_t reg, uint32_t op, uint32_t chid, int ev, int want)
+{
+	wr(reg, op << 24 | chid);
+	uint64_t end = ticks() + 19200000 / 20;		/* 50 ms */
+	while (ticks() < end) {
+		uint32_t st = ev ? ev_state() : ch_state(chid);
+		if (want >= 0 && st == (uint32_t)want)
+			break;
+	}
+	wr(SRC_CH_IRQ_CLR, rd(SRC_CH_IRQ));
+	wr(SRC_EV_IRQ_CLR, rd(SRC_EV_IRQ));
+	if (want < 0)
+		return 0;
+	return (ev ? ev_state() : ch_state(chid)) == (uint32_t)want ? 0 : -1;
+}
+
+static uint32_t gpi_init_rc;
+
+/* returns 0, or a step code: 0x1x ev alloc, 0x2x ch alloc, 0x3x ch start */
+static uint32_t gpi_init(void)
+{
+	/* leftovers from the bootloader: stop / reset / de-alloc */
+	for (int k = 0; k < 2; k++) {
+		if (ch_state(k) == 2)
+			gpi_cmd(CH_CMD, CMD_STOP, k, 0, 3);
+		if (ch_state(k)) {
+			gpi_cmd(CH_CMD, CMD_RESET, k, 0, 1);
+			gpi_cmd(CH_CMD, CMD_DEALLOC, k, 0, 0);
+		}
+	}
+	if (ev_state()) {
+		gpi_cmd(EV_CMD, CMD_RESET, 0, 1, -1);
+		gpi_cmd(EV_CMD, CMD_DEALLOC, 0, 1, 0);
+	}
+	for (unsigned i = 0; i < EV_EL * 4; i++)
+		ev_ring[i] = 0;
+	for (unsigned i = 0; i < CH_EL * 4; i++)
+		ch_ring[0][i] = ch_ring[1][i] = 0;
+	dcache_flush(ev_ring, sizeof(ev_ring));
+	dcache_flush(ch_ring, sizeof(ch_ring));
+
+	/* gpi_config_interrupts(DEFAULT): harmless with polling, keeps state like Linux */
+	wr(CNTXT_TYPE_IRQ + 8, 0x7f);			/* TYPE_IRQ_MSK */
+	wr(GPI_EE + 0x230b8 + GPII_OFF, 1);		/* SRC_IEOB_IRQ_MSK */
+	wr(GPI_EE + 0x23098 + GPII_OFF, 3);		/* SRC_CH_IRQ_MSK */
+	wr(GPI_EE + 0x2309c + GPII_OFF, 1);		/* SRC_EV_CH_IRQ_MSK */
+	wr(GPI_EE + 0x23108 + GPII_OFF, 0xf);		/* GLOB_IRQ_EN */
+	wr(GPI_EE + 0x23120 + GPII_OFF, 0xf);		/* GPII_IRQ_EN */
+	wr(GPI_EE + 0x23180 + GPII_OFF, 1);		/* INTSET */
+
+	/* gpi_alloc_ev_chan */
+	if (gpi_cmd(EV_CMD, CMD_ALLOC, 0, 1, 1))
+		return 0x10 | ev_state();
+	uintptr_t evp = (uintptr_t)ev_ring;
+	wr(EV_CNTXT + 0x00, 16u << 24 | 1u << 16 | 2u);	/* el size, INTTYPE_IRQ, GPI_EV */
+	wr(EV_CNTXT + 0x04, sizeof(ev_ring));
+	wr(EV_CNTXT + 0x08, (uint32_t)evp);
+	wr(EV_CNTXT + 0x0c, (uint32_t)(evp >> 32));
+	wr(EV_DB + 4, (uint32_t)(evp >> 32));
+	wr(EV_CNTXT + 0x20, 0);
+	wr(EV_CNTXT + 0x28, 0);
+	wr(EV_CNTXT + 0x2c, 0);
+	wr(EV_CNTXT + 0x30, 0);
+	wr(EV_CNTXT + 0x34, 0);
+	ev_rp = 0;
+	wr(EV_DB, (uint32_t)(evp + sizeof(ev_ring) - 16));
+
+	/* gpi_alloc_chan x2: chan 0 = TX (dir out), chan 1 = RX (dir in) */
+	for (int k = 0; k < 2; k++) {
+		if (gpi_cmd(CH_CMD, CMD_ALLOC, k, 0, 1))
+			return 0x20 | k << 3 | ch_state(k);
+		uintptr_t rp = (uintptr_t)ch_ring[k];
+		wr(CH_CNTXT(k) + 0x00, 16u << 24 | (k == 0 ? 1u : 0u) << 3 | 2u);
+		wr(CH_CNTXT(k) + 0x04, CH_EL * 16);
+		wr(CH_CNTXT(k) + 0x08, (uint32_t)rp);
+		wr(CH_CNTXT(k) + 0x0c, (uint32_t)(rp >> 32));
+		wr(CH_DB(k) + 4, (uint32_t)(rp >> 32));
+		wr(CH_SCRATCH(k) + 0x0, (uint32_t)(!k) << 16 | GPI_PROTO_SPI << 4 | GPI_SEID);
+		wr(CH_SCRATCH(k) + 0x4, 0);
+		wr(CH_SCRATCH(k) + 0x8, 0);
+		wr(CH_SCRATCH(k) + 0xc, 0);
+		wr(CH_QOS(k), 1);
+		ch_wp[k] = 0;
+	}
+	for (int k = 0; k < 2; k++)
+		if (gpi_cmd(CH_CMD, CMD_START, k, 0, 2))
+			return 0x30 | k << 3 | ch_state(k);
+	return 0;
+}
+
+static void ch_queue(int k, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
+{
+	uint32_t *t = &ch_ring[k][ch_wp[k] * 4];
+	t[0] = d0; t[1] = d1; t[2] = d2; t[3] = d3;
+	dcache_flush(t, 16);
+	ch_wp[k] = (ch_wp[k] + 1) % CH_EL;
+}
+
+static void ch_ring_db(int k)
+{
+	__asm__ volatile("dsb sy" : : : "memory");
+	wr(CH_DB(k), (uint32_t)((uintptr_t)ch_ring[k] + ch_wp[k] * 16));
+}
+
+/* consume events until both channels reported a transfer completion; bit k = chan k done */
+static int gpi_wait(uint64_t end)
+{
+	int done = 0;
+	while (ticks() < end && done != 3) {
+		uint32_t hw = rd(EV_CNTXT + 0x10);
+		unsigned hw_rp = (hw - (uint32_t)(uintptr_t)ev_ring) / 16 % EV_EL;
+		while (ev_rp != hw_rp) {
+			uint32_t *e = &ev_ring[ev_rp * 4];
+			dcache_flush(e, 16);
+			for (int i = 0; i < 4; i++)
+				gpi_last_ev[i] = e[i];
+			gpi_events++;
+			uint32_t type = (e[3] >> 16) & 0xff, chid = e[3] >> 24, code = e[2] >> 24;
+			if (type == EV_XFER_COMPL && chid < 2) {
+				if (code == 16)			/* MSM_GPI_TCE_UNEXP_ERR */
+					return -(int)(0x100 | chid);
+				done |= 1 << chid;
+			}
+			/* recycle: give the slot back to the hardware */
+			wr(EV_DB, (uint32_t)((uintptr_t)ev_ring + ev_rp * 16));
+			ev_rp = (ev_rp + 1) % EV_EL;
+		}
+	}
+	return done;
+}
+
+static int gpi_ok;
+
+/* apps SMMU (MMU-500 @ 0x15000000): how is this stream routed? type 0 = translate, 1 = bypass, 2 = fault */
+static void smmu_sid_check(uint32_t sid)
+{
+	const uintptr_t smmu = 0x15000000UL;
+	uint32_t nsmr = rd(smmu + 0x20) & 0xff, found = 0;
+	for (uint32_t n = 0; n < nsmr; n++) {
+		uint32_t smr = rd(smmu + 0x800 + 4 * n);
+		if (!(smr >> 31) || ((smr ^ sid) & ~(smr >> 16) & 0x7fff))
+			continue;
+		uint32_t s2cr = rd(smmu + 0xc00 + 4 * n);
+		con_hex2("SMMU", "gpi smr=", smr, "s2cr=", s2cr);
+		found++;
+	}
+	if (!found)
+		con_hex2("SMMU", "gpi sid unmatched cr0=", rd(smmu), "sid=", sid);
+}
+
 static uint32_t last_fail_status, last_fail_irq, last_fail_fifo, after_tx_status, after_tx_fifo;
 
 /* One full-duplex FIFO transfer of n (<= 64) bytes, CS held low around it. */
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 {
+	if (gpi_ok) {
+		for (unsigned i = 0; i < n; i++) {
+			dma_tx[i] = tx[i];
+			dma_rx[i] = 0xee;
+		}
+		dcache_flush(dma_tx, sizeof(dma_tx));
+		dcache_flush(dma_rx, sizeof(dma_rx));
+		cs(0);
+		udelay(2);
+		uintptr_t txp = (uintptr_t)dma_tx, rxp = (uintptr_t)dma_rx;
+		/* RX first (Linux issues rx before tx) */
+		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16 | TF_IEOT);
+		ch_ring_db(1);
+		/* TX: CONFIG0 (8-bit word, mode 0, packing, clk src 0 div 2), GO duplex, DMA */
+		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+		ch_queue(0, 3u /* SPI_DUPLEX */, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
+		ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
+		ch_ring_db(0);
+		int done = gpi_wait(ticks() + 19200000 / 10);
+		udelay(2);
+		cs(1);
+		dcache_flush(dma_rx, sizeof(dma_rx));
+		for (unsigned i = 0; i < n; i++)
+			rx[i] = dma_rx[i];
+		if (done != 3) {
+			last_fail_status = (uint32_t)done;
+			last_fail_irq = ch_state(0) << 4 | ch_state(1);
+			last_fail_fifo = rd(GLOB_IRQ_STTS) << 16 | (rd(CNTXT_TYPE_IRQ) & 0xffff);
+			gpi_err_info = rd(GPII_ERR);
+			return done < 0 ? done : -2;
+		}
+		return 0;
+	}
 	if (!wait_clear(SE + SE_STATUS, 1u, 100000))
 		return -1;
 	wr(SE + SE_M_IRQ_CLR, 0xffffffffu);
@@ -262,8 +507,11 @@ void touch_probe(void)
 	wr(SE + SE_GSI_EV_EN, 0);
 	wr(SE + SE_M_IRQ_CLR, 0xffffffffu);
 	wr(SE + SE_S_IRQ_CLR, 0xffffffffu);
-	wr(SE + SE_M_IRQ_EN, rd(SE + SE_M_IRQ_EN) | 1u | (1u << 3) | (1u << 5) | (1u << 26) | (1u << 27) | (1u << 30));
-	wr(SE + SE_DMA_MODE, 0);
+	/* geni_se_select_gpi_mode */
+	wr(SE + SE_IRQ_EN, 0);
+	wr(SE + SE_M_IRQ_EN, rd(SE + SE_M_IRQ_EN) & ~(1u | (1u << 26) | (1u << 27) | (1u << 30)));
+	wr(SE + SE_DMA_MODE, 1);
+	wr(SE + SE_GSI_EV_EN, rd(SE + SE_GSI_EV_EN) | 0xfu);
 	wr(SE + SE_SPI_CPHA, 0);
 	wr(SE + SE_SPI_CPOL, 0);
 	wr(SE + SE_SPI_DEMUX, 0);
@@ -275,6 +523,10 @@ void touch_probe(void)
 	wr(SE + SE_RX_PACK1, PACK1);
 	wr(SE + SE_CLK_SEL, 0);
 	wr(SE + SE_MCLK_CFG, (2u << 4) | 1u);
+	smmu_sid_check(0xb6);
+	gpi_init_rc = gpi_init();
+	gpi_ok = !gpi_init_rc;
+	con_hex2("GPI", "init=", gpi_init_rc, "ch/ev st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
 	con_hex2("PINS", "irq25=", rd(TLMM + 25 * 0x1000UL + 4) & 1, "cs47=", rd(TLMM + 47 * 0x1000UL + 4));
 
 	/* 4. STM: system reset, wait for READY (status event, type INFO, id 0) */
@@ -291,9 +543,10 @@ void touch_probe(void)
 			udelay(20000);
 	}
 	con_hex2("STM RST", "rc/ready=", (uint32_t)rc << 8 | ready, "tries=", tries);
-	con_hex2("SPI FAIL", "st/irq=", last_fail_status << 16 | (last_fail_irq & 0xffff), "fifo t/r=", last_fail_fifo);
-	con_hex2("SPI FAIL", "irqhi=", last_fail_irq >> 16, "irqen=", rd(SE + SE_M_IRQ_EN));
-	con_hex2("SPI TX", "st after=", after_tx_status, "txfifo=", after_tx_fifo);
+	con_hex2("GPI FAIL", "done=", last_fail_status, "chst=", last_fail_irq);
+	con_hex2("GPI FAIL", "glob/type=", last_fail_fifo, "err=", gpi_err_info);
+	con_hex2("GPI EV", "n=", gpi_events, "w3=", gpi_last_ev[3]);
+	con_hex2("GPI EV", "w0=", gpi_last_ev[0], "w2=", gpi_last_ev[2]);
 	con_hex2("STM EV", "", be(ev, 0, 1, 2, 3), "", be(ev, 4, 5, 6, 7));
 	uint8_t id[8] = { 0 };
 	rc = stm_read_reg(0x22, id, 5);		/* STM_TS_READ_DEVICE_ID */
