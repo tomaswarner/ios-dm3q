@@ -91,6 +91,17 @@
   (2) QMP UFS PHY init at 0x1d80000 with Linux phy-qcom-qmp-ufs.c sm8550 tables (serdes/tx/rx/pcs);
   (3) HCE, link startup, NOP, fDeviceInit (already written in shim/ufs.c test_ufs_wake). Device RST_n is
   off limits (TLMM page resets the SoC). Recovery is always just a reboot: ABL re-inits UFS for Android.
+- **Prior-art survey (2026-10-20):** of ~200 ios-sweet forks none has solved this. topaz/v60 inherit sweet's
+  UFS driver ("reuses ABL's UFSHCI state": Xiaomi/LG ABLs leave UFS up; Samsung's powers it down). Newer
+  chips (dodge SM8750: builds only; mondrian SM8475: QEMU only; lemonadep SM8350: stuck in early boot;
+  zeus SM8450: copy of sweet notes) never reached UFS on hardware. **Best reference: U-Boot master**
+  (Linaro, runs chainloaded from ABL): `drivers/phy/qcom/phy-qcom-qmp-ufs.c` has `qcom,sm8550-qmp-ufs-phy`
+  tables, `drivers/ufs/ufs-qcom.c`, `drivers/soc/qcom/{rpmh-rsc,cmd-db}.c`,
+  `drivers/power/regulator/qcom-rpmh-regulator.c` (pm8550*), `drivers/clk/qcom/clock-sm8550.c`.
+  Mainline Linux has **sm8550-samsung-q5q.dts (Galaxy Z Fold5, same SoC + Samsung ABL)**: ufs reset-gpios
+  tlmm 210, vcc l17b 2.5 V, vccq l1g 1.2 V, vdd-hba l3g, PHY vdda l1d 0.88 V / pll l3e 1.2 V; tlmm
+  gpio-reserved-ranges <36 4>, <50 2>. Linux toggles TLMM 210 from HLOS there, so the ufs5 SoC reset needs
+  a second look (MMU-off access? offset?). U-Boot phones.rst: pinctrl/SMMU are the usual crashdump causes.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
