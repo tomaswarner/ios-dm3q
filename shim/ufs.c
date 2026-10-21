@@ -1017,7 +1017,8 @@ void ufs_logview(void)
 #define LOGGREP_PAT "SWEET USB"
 #endif
 		static const char pat[] = LOGGREP_PAT;
-		static char line[512], keep[TXT_ROWS][TXT_COLS + 1];
+#define LOGGREP_TOP 12
+		static char line[512], keep[TXT_ROWS - LOGGREP_TOP][TXT_COLS + 1];
 		uint32_t nk = 0, ll = 0, valid = total < size ? (uint32_t)total : size;
 		uint64_t from = total - valid;
 		static uint8_t one[BLOCK] __attribute__((aligned(4096)));
@@ -1043,7 +1044,7 @@ void ufs_logview(void)
 				hit = k == sizeof(pat) - 1;
 			}
 			if (hit) {
-				if (nk == TXT_ROWS - 1) {        /* keep the newest rows */
+				if (nk == TXT_ROWS - LOGGREP_TOP - 1) {  /* keep the newest rows */
 					for (uint32_t r = 1; r < nk; r++)
 						for (uint32_t c = 0; c <= TXT_COLS; c++)
 							keep[r - 1][c] = keep[r][c];
@@ -1058,9 +1059,9 @@ void ufs_logview(void)
 			ll = 0;
 		}
 		con_clear(0xff000000u);
-		for (uint32_t r = 0; r < nk; r++)
+		for (uint32_t r = 0; r < nk; r++)    /* below the LOGGREP/DONE banner rows */
 			for (int c = 0; keep[r][c]; c++)
-				small_char(c, r, keep[r][c], 0xffffffffu);
+				small_char(c, r + LOGGREP_TOP, keep[r][c], 0xffffffffu);
 		con_hex2("LOGGREP", "lines=", nk, "ring bytes=", valid);
 		return;
 	}
