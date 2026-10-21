@@ -400,6 +400,10 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 			udelay(1500000);
 			con_hex2("GPI A", "ok txrp=", rd(CH_CNTXT(0) + 0x10), "st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
 			con_hex2("GPI A", "se mirq=", rd(SE + SE_M_IRQ), "se st=", rd(SE + SE_STATUS));
+			con_hex2("SE A", "clkro=", rd(SE + 0x060), "mclk/sel=", rd(SE + SE_MCLK_CFG) << 16 | (rd(SE + SE_CLK_SEL) & 0xffff));
+			con_hex2("SE A", "mcmd0=", rd(SE + 0x600), "ios=", rd(SE + 0x908));
+			con_hex2("SE A", "dmatx irq=", rd(SE + 0xc40), "len/in=", rd(SE + 0xc3c) << 16 | (rd(SE + 0xc54) & 0xffff));
+			con_hex2("SE A", "rcg cmd=", rd(GCC_S4_RCG), "cbcr=", rd(GCC + 0x184e4));
 			wr(SE + SE_M_IRQ_CLR, rd(SE + SE_M_IRQ));
 			udelay(1500000);
 			ch_queue(0, tx_cfg, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
