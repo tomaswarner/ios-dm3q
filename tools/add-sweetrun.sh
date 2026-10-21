@@ -7,6 +7,13 @@
 set -euo pipefail
 in=$1 out=$2 bin=$3
 [ -e "$out" ] && { echo "refusing to overwrite $out" >&2; exit 1; }
+# launchd panics on a non-platform daemon and sweet_amfi only makes *signed* root-fs code
+# platform; the iOS clang link does not sign (codesign -f -s - FILE).
+for f in "$bin"; do
+	if file -b "$f" | grep -q Mach-O && ! codesign -v "$f" 2>/dev/null; then
+		echo "unsigned Mach-O: $f (codesign -f -s - $f)" >&2; exit 1
+	fi
+done
 tok=~/.sweetrun-token
 [ -s $tok ] || { (umask 077; openssl rand -hex 16 > $tok); }
 mnt=$(mktemp -d "${TMPDIR:-/tmp}/iosroot.XXXXXX")

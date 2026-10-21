@@ -312,6 +312,12 @@
   default shader cache directory` (launchd job has no HOME). Fix: sm_device_create sets the cache dir
   (SWEETMETAL_CACHE, else runtime default under HOME, else /private/var/tmp/metal2vulkan-<uid>) and caps it
   at 2 GiB; host run without HOME passes. Root test4 rebuilt = test2 + fixed sm_smoke + sweetrun.
+  **test4 v1 PANIC (2026-10-21 13:52, photo):** `userspace panic: unexpected exec of non-platform binary:
+  /usr/local/sweettest/sweetrun: com.sweet.sweetrun` - launchd panics for a non-platform system daemon.
+  Cause: `xcrun -sdk iphoneos clang` does NOT sign (sweetrun and sm_smoke were unsigned; earlier test
+  binaries had been `codesign -s -`'d by hand) and sweet_amfi (0035/0036) makes only *signed* root-fs code
+  platform. sm_smoke still ran (spawned by sweettest, not launchd). **Rule: `codesign -f -s - -i NAME`
+  every iOS binary;** add-sweettest.sh/add-sweetrun.sh now refuse unsigned Mach-Os. test4 rebuilt signed.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
   while the phone went on to the home screen - likely no re-enumeration after a cable replug (unconfirmed).
 - **🎉 JIT + VULKAN ON THE PHONE (boot x18s + root test1, 2026-10-21 12:40):** boot-time runner

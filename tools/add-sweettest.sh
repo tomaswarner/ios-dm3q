@@ -8,6 +8,13 @@
 set -euo pipefail
 in=$1 out=$2 dir=$3
 [ -e "$out" ] && { echo "refusing to overwrite $out" >&2; exit 1; }
+# launchd panics on a non-platform daemon and sweet_amfi only makes *signed* root-fs code
+# platform; the iOS clang link does not sign (codesign -f -s - FILE).
+for f in "$dir"/*; do
+	if file -b "$f" | grep -q Mach-O && ! codesign -v "$f" 2>/dev/null; then
+		echo "unsigned Mach-O: $f (codesign -f -s - $f)" >&2; exit 1
+	fi
+done
 mnt=$(mktemp -d "${TMPDIR:-/tmp}/iosroot.XXXXXX")
 cp -c "$in" "$out"
 dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -mountpoint "$mnt" "$out" | awk 'NR==1{print $1}')
