@@ -37,6 +37,9 @@
   Hypothesis: the virtual timer interrupt (INTID 27) is not delivered/handled under Gunyah (SGIs are).
   Test image `shim/out/dm3q-gic1-boot.img` (no payload): PSCI, `test_gic` (VTIMER 27 / PTIMER 30 / SGI1
   irq counts), then the UFS probe, then holds.
+- **gic1 result (IMG_5716/5717):** SEA (ESR 0x96000010) at FAR 0x17190400 = GICR SGI frame IPRIORITYR+0 from
+  the shim's `wr8`: **Gunyah's vGIC aborts byte accesses**; the kernel's pe_fiq.c uses 32-bit writes (OK).
+  Shim fixed (32-bit RMW) -> `shim/out/dm3q-gic2-boot.img`. Rule for all DM3Q drivers: GIC MMIO 32-bit only.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

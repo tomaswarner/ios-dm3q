@@ -172,7 +172,7 @@ void secondary_main(uint64_t idx)
 			sec_probe[0] = rd32(r + GICR_IGROUPR0);
 			wr32(r + GICR_IGROUPR0, 0xffffffff);
 			sec_probe[1] = rd32(r + GICR_IGROUPR0);
-			wr8(r + GICR_IPRIORITYR + 19, 0xa0);
+			wr32(r + GICR_IPRIORITYR + 16, (rd32(r + GICR_IPRIORITYR + 16) & 0x00ffffff) | 0xa0000000U);
 			sec_probe[2] = rd32(r + GICR_IPRIORITYR + 16);
 		}
 		sec_probe[3] = r ? 1 : 0xdead;
@@ -315,8 +315,9 @@ static void test_gic(void)
 	wr32(r + GICR_IGROUPR0, 0xffffffff);	/* NS view: secure bits are WI */
 	uint32_t en_before = rd32(r + GICR_ISENABLER0);
 	uint32_t pri_before = rd32(r + GICR_IPRIORITYR + 16);	/* INTIDs 16..19 */
-	for (int id = 0; id < 32; id++)
-		wr8(r + GICR_IPRIORITYR + id, 0xa0);
+	/* 32-bit only: Gunyah's vGIC aborts byte accesses (DM3Q: SEA at IPRIORITYR+0) */
+	for (int id = 0; id < 32; id += 4)
+		wr32(r + GICR_IPRIORITYR + id, 0xa0a0a0a0);
 	wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
 	con_hex2("ENABLE", "was=", en_before, "now=", rd32(r + GICR_ISENABLER0));
 	(void)grp;
