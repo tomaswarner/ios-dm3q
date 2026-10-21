@@ -1011,9 +1011,12 @@ void ufs_logview(void)
 		return;
 	}
 #if defined(DIAG_LOGGREP)
-	/* whole ring, keep only lines containing "SWEET USB" (they come early in a boot) */
+	/* whole ring, keep only lines containing LOGGREP_PAT (default "SWEET USB": early in a boot) */
 	{
-		static const char pat[] = "SWEET USB";
+#ifndef LOGGREP_PAT
+#define LOGGREP_PAT "SWEET USB"
+#endif
+		static const char pat[] = LOGGREP_PAT;
 		static char line[512], keep[TXT_ROWS][TXT_COLS + 1];
 		uint32_t nk = 0, ll = 0, valid = total < size ? (uint32_t)total : size;
 		uint64_t from = total - valid;

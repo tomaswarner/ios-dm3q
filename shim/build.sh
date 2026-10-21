@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 CC=${CROSS:-aarch64-elf-}gcc
 OBJCOPY=${CROSS:-aarch64-elf-}objcopy
 MKBOOTIMG="python3 ../../tools/mkbootimg/mkbootimg.py"
-CFLAGS="${DIAG:+-DDIAG_$(echo $DIAG | tr a-z A-Z)} -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+CFLAGS="${DIAG:+-DDIAG_$(echo $DIAG | tr a-z A-Z)} ${LOGGREP_PAT:+-DLOGGREP_PAT=\"$LOGGREP_PAT\"} -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
 mkdir -p out
 for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c rpmh.c ufsphy.c touch.c perf.c usb.c; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
