@@ -205,6 +205,12 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Host testbed works (2026-10-21):** Mesa main af17d14 lavapipe built on macOS (`third_party/mesa/build-host`,
+  meson -Dvulkan-drivers=swrast -Dgallium-drivers=llvmpipe -Dplatforms= ..., link needs -L/opt/homebrew/lib for
+  zstd; brew meson ninja cmake llvm(23.1.4) glslang vulkan-loader, venv third_party/venv with mako/pyyaml).
+  metal2vulkan-runtime tests with RUSTFLAGS=--cfg m2v_cpu_icd, VK_ICD_FILENAMES=<lvp json>,
+  DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib: 985 pass; the 77 failures are all Unproven
+  HostReleaseUnmeasured (no MetalLevel measured for macOS 26.6): name `metal_level` in DeviceOptions on iOS.
 - **Vulkan for the iOS Metal stack (2026-10-21):** metal2vulkan-runtime cross-compiles for aarch64-apple-ios
   unchanged (IPHONEOS_DEPLOYMENT_TARGET=16.0). JIT: sweet's AMFI has no proc_check_map_anon hook, so every
   process is jit_entitled; W+X only blocked via vm_map_cs_enforcement (off with cs_enforcement_disable=1) -
