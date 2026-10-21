@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "touch.h"
+#include "rpmh.h"
 
 #define GCC		0x00100000UL
 #define TLMM		0x0f100000UL
@@ -326,6 +327,27 @@ static uint32_t gpi_clk_level;
 #define S4_PERF_M(l)	(S4_RCG + 0x5c + 4 * (l))
 #define S4_PERF_N(l)	(S4_RCG + 0x9c + 4 * (l))
 #define SE_DFS_IF_CFG	0x080
+
+/*
+ * QUP core clock: on sm8550 the wrapper core clock is an RPMh clock BCM
+ * ("QUP1", clk_virt; spi@a90000 interconnects "qup-core"), keepalive in Linux.
+ * Nothing votes it in the shim, so the SE sequencer may have no core clock
+ * (touch14: DFS level 0 = XO valid, cmd loaded, data in, cmd never finishes).
+ * BCM_TCS_CMD(commit 30, valid 29, x << 14, y): the keepalive vote is x = y = 1.
+ */
+static void qup_core_vote(void)
+{
+	uint32_t ver = rpmh_version();
+	int db = rpmh_cmddb_ok();
+	uint32_t addr = db ? rpmh_cmddb_addr("QUP1") : 0;
+	int rc = -9;
+	if (addr) {
+		const uint32_t a[1] = { addr };
+		const uint32_t d[1] = { 1u << 30 | 1u << 29 | 1u << 14 | 1u };
+		rc = rpmh_write(a, d, 1);
+	}
+	con_hex2("QUP BCM", "ver/db=", ver << 4 | (uint32_t)db, "qup1 addr/rc=", addr << 8 | ((uint32_t)rc & 0xff));
+}
 
 static void se_clock_dfs(void)
 {
@@ -649,6 +671,7 @@ void touch_probe(void)
 	wr(SE + SE_RX_PACK1, PACK1);
 	wr(SE + SE_CLK_SEL, 0);
 	wr(SE + SE_MCLK_CFG, (2u << 4) | 1u);
+	qup_core_vote();
 	se_clock_dfs();
 	smmu_sid_check(0xb6);
 	int smmu_ok = smmu_route_sid_like(0xb6, 0x60);	/* gpi_dma1 TRE/event fetch, like UFS */
@@ -699,6 +722,10 @@ void touch_probe(void)
 	static const uint8_t scan[3] = { 0xa0, 0x00, 0x01 };
 	rc = stm_write(scan, 3);
 	con_hex2("STM SCAN", "rc=", (uint32_t)rc, "", 0);
+	if (be(id, 0, 1, 2, 3) == 0 || be(id, 0, 1, 2, 3) == 0xeeeeeeeeu) {
+		con_str("TOUCH", "IC did not answer: skipping the touch loop");
+		return;
+	}
 	con_str("TOUCH", "touch the screen now (30 s)");
 	int line = con_get_row(), shown = 0, n = 0;
 	uint64_t end = ticks() + 19200000ULL * 30;
