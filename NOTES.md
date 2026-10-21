@@ -274,6 +274,13 @@
   0x3d6a000, GDSCs CX/GX, zap via SCM/PAS. Plan: A) make CA/CoreImage take CA::OGL::SW / software CI
   instead of the empty EAGL path (days-2 wks); DPU scaling (2-4 wks); C) Adreno CP bring-up (1-3 months);
   B) Metal (6+ months).
+- **🎉 USB WORKS on the S23 (boot x17s, kernel out-dm3q-010, 2026-10-21):** Mac enumerates "Sweet iOS (USB Ethernet)"
+  (1209:0001, high speed), AppleUserECM -> en9; `sudo ifconfig en9 inet 192.168.7.1 netmask 255.255.255.0 up`,
+  ping 192.168.7.2 ~2 ms, live kernel log on udp/5140 (`tools/sweet-usbnet-mac.sh ~/s23-log.txt`). Fixes: 0107
+  (sweetusb=3: SM8550 GDSC/clocks, SMMU stream 0x40 routed like UFS) + 0108 (DWC_usb31: QSCRATCH GENERAL_CFG
+  PIPE_UTMI_CLK_SEL|PIPE3_PHYSTATUS_SW via dwc3-qcom select_utmi_clk before CSFTRST; it was stuck 500 ms).
+  ABL leaves GDSC/clocks/eUSB2 PHY on and the DWC3 halted in device mode (probe usb1). `DIAG=loggrep` shim =
+  whole-ring 'SWEET USB' filter.
 - **Green screen = SpringBoard crash loop after the user enabled Accessibility > Bold Text (x10s/x11s/x12s,
   log viewer IMG_5796-5798).** CRASH SpringBoard sig 11 pc 0 at CI::GLContext::init+204 (GetMacroContext ->
   glDisable(GL_DEPTH_TEST) through an all-zero GL dispatch) <- CIContext contextWithOptions <-
