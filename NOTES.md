@@ -391,6 +391,17 @@
   Open: function-constant specialization (_MTLLibrary newFunctionWithName:constantValues: goes to the
   compiler) - handle in our device; test first with a phone-side program that loads the bundle and calls
   initWithAcceleratorPort:0 directly (no kernel change), then the kernel IOAcceleratorES nub behind sweetmetal=1.
+  **SweetMetal.bundle slice 1 (2026-10-21 ~19:15, `sweetmetal/objc/SweetMetal.m`, built as a dylib for now):**
+  SweetMTLDevice : _MTLDevice (initWithAcceleratorPort: -> [super init] + sm_device_create), buffers, command
+  queue/buffer (commit -> sm commit, completion on a global queue), compute encoder (setBuffer/setBytes/
+  dispatchThreads/dispatchThreadgroups), compute pipelines from `-[_MTLFunction bitcodeData]` ->
+  sm_library_new_with_air. Unimplemented selectors log `SWEETMETAL missing: -[Class sel]`. New C API:
+  sm_compute_dispatch_threadgroups, sm_compute_pipeline_limits. Probe `sweetmetal/objc/mtl_probe.m` (dlopen
+  the dylib, no kernel nub). **Phone result (sweetrun):** device up; Apple's loader reads QuartzCore's
+  default.metallib through our device (141 functions, 39/95/7, every newFunctionWithName OK); compute
+  pipelines compute_apl, compute_apl_fast, sum_apl_and_compute_dimming_factor OK; tile_downsample_{1,2,4,8}
+  = NeedsInput(TileAttachments) (tile shaders, need a render pass). MTLCreateSystemDefaultDevice still nil
+  (no IOAcceleratorES). Build: see the commands in the commit; dylib 29 MB (static libsweetmetal).
   NEXT: the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)

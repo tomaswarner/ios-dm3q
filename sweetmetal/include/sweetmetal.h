@@ -47,6 +47,10 @@ bool sm_compute_set_pipeline(sm_compute_encoder *enc, const sm_compute_pipeline 
 bool sm_compute_set_buffer(sm_compute_encoder *enc, const sm_buffer *buf, uint64_t offset, uint32_t index);
 bool sm_compute_dispatch_threads(sm_compute_encoder *enc, uint64_t tx, uint64_t ty, uint64_t tz,
                                  uint64_t gx, uint64_t gy, uint64_t gz);
+bool sm_compute_dispatch_threadgroups(sm_compute_encoder *enc, uint64_t gx, uint64_t gy, uint64_t gz,
+				      uint64_t tx, uint64_t ty, uint64_t tz);
+/* out[0] maxTotalThreadsPerThreadgroup, [1] threadExecutionWidth, [2] staticThreadgroupMemoryLength */
+void sm_compute_pipeline_limits(const sm_compute_pipeline *p, uint32_t out[3]);
 bool sm_compute_end_encoding(sm_compute_encoder *enc); /* frees enc */
 
 /* ---- textures, samplers, render, blit (src/graphics.rs). Metal enums are raw values. ---- */

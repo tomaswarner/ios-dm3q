@@ -296,6 +296,29 @@ pub unsafe extern "C" fn sm_compute_dispatch_threads(
     (*enc).dispatch_threads(Size::new(tx, ty, tz), Size::new(gx, gy, gz)).map_err(set_error).is_ok()
 }
 
+/// `dispatchThreadgroups:threadsPerThreadgroup:`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_compute_dispatch_threadgroups(
+    enc: *mut ComputeCommandEncoder, gx: u64, gy: u64, gz: u64, tx: u64, ty: u64, tz: u64,
+) -> bool {
+    if enc.is_null() {
+        return false;
+    }
+    (*enc).dispatch_threadgroups(Size::new(gx, gy, gz), Size::new(tx, ty, tz)).map_err(set_error).is_ok()
+}
+
+/// `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth`, `staticThreadgroupMemoryLength`.
+#[no_mangle]
+pub unsafe extern "C" fn sm_compute_pipeline_limits(p: *const ComputePipelineState, out: *mut u32) {
+    if p.is_null() || out.is_null() {
+        return;
+    }
+    let p = &*p;
+    *out = p.max_total_threads_per_threadgroup();
+    *out.add(1) = p.thread_execution_width();
+    *out.add(2) = p.static_threadgroup_memory_length();
+}
+
 /// `endEncoding`: consumes and frees the encoder.
 #[no_mangle]
 pub unsafe extern "C" fn sm_compute_end_encoding(enc: *mut ComputeCommandEncoder) -> bool {
