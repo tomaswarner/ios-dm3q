@@ -77,6 +77,12 @@
   (TLMM 0xF0DE004 bit0, active low), vcc RPMh ldob17 2.5 V, vccq ldog1 1.2 V (parent smpg4), ref clk ldog3,
   PHY ufsphy_mem@1d80000 "qcom,ufs-phy-qmp-v4-kalama". Probe `shim/out/dm3q-ufs5-boot.img` (test_ufs_wake):
   RST_n pulse, HCE 0->1, DME_LINKSTARTUP, NOP OUT, fDeviceInit, TUR/CAP, GPT (no PHY init, no RPMh votes yet).
+- **ufs5 result (IMG_5728/5729):** ABL's SSU CDB byte 4 = 0x30: **power condition 3 = UFS-PowerDown**, START 0.
+  Then the first read of TLMM UFS_RESET io (0xF0DE004) **reset the whole SoC** within ~1 s (no exception,
+  no panic screen): that TLMM page is protected for the HLOS VM (Gunyah/XPU). Never touch it from EL1;
+  device reset must go another way (SCM/hyp call? or not needed). Probe `shim/out/dm3q-ufs6-boot.img`:
+  no pin; HCE 0->1, DME_LINKSTARTUP, NOP OUT, SSU Active (1b 00 00 00 11 00) to W-LUN 0xD0, fDeviceInit,
+  TUR/CAP, GPT.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

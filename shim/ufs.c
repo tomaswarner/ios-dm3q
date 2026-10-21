@@ -507,7 +507,7 @@ void test_ufs_dm3q(void)
 
 /* ---- DM3Q: wake the UFS device that ABL powered down at exit ----------- */
 
-#define TLMM_UFS_RESET_IO	0x0f0de004UL	/* pinctrl-sm8550 UFS_RESET io_reg, out bit 0, active low */
+/* TLMM UFS_RESET io_reg 0x0f0de004 (pinctrl-sm8550): DO NOT access, it resets the SoC (dm3q ufs5) */
 #define IS_ULSS			(1u << 8)
 
 static void udelay(uint32_t us)
@@ -567,14 +567,13 @@ void test_ufs_wake(void)
 			    "cdb0-4=", c[16] << 24 | c[19] << 8 | c[20]);	/* opcode .. byte4 = power cond<<4 | start */
 		}
 	}
-	con_hex2("UFS", "hcs=", ufs_rd(REG_HCS), "rst io=", mmio_rd(TLMM_UFS_RESET_IO));
+	con_hex2("UFS", "hcs=", ufs_rd(REG_HCS), "is=", ufs_rd(REG_IS));
 
-	/* 1. device hardware reset (RST_n low 20 us), as ufs_qcom_device_reset */
-	stage_str("ufs reset pin");
-	mmio_wr(TLMM_UFS_RESET_IO, 0);
-	udelay(20);
-	mmio_wr(TLMM_UFS_RESET_IO, 1);
-	udelay(100);
+	/*
+	 * 1. No RST_n pulse: dm3q ufs5 showed that touching the TLMM UFS_RESET
+	 * register (0xF0DE004) from the shim resets the whole SoC (no exception).
+	 * Wake the device in software instead: link startup, then SSU Active.
+	 */
 
 	/* 2. host controller reset: HCE 0 -> 1 */
 	stage_str("ufs hce");
@@ -615,6 +614,16 @@ void test_ufs_wake(void)
 	con_hex2("NOP", "rc=", nop << 8 | ocs, "tries=", tries);
 	if (nop)
 		return;
+
+	/* 4b. leave UFS-PowerDown: START STOP UNIT, power condition Active (1), START=1, to W-LUN 0xD0 */
+	stage_str("ufs ssu active");
+	static const uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x11, 0 };
+	for (int i = 0; i < 3; i++) {
+		rc = scsi(0xd0, ssu, sizeof(ssu), 0, 0, &ocs, &st);
+		if (!rc)
+			break;
+	}
+	con_hex2("SSU", "rc=", rc, "ocs/st=", ocs << 8 | st);
 
 	/* 5. fDeviceInit: set, then poll until the device clears it */
 	stage_str("ufs fdeviceinit");
