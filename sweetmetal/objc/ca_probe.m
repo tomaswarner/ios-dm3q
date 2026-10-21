@@ -30,6 +30,59 @@ static CGColorRef rgb(double r, double g, double b)
 	return col;
 }
 
+/* Frames at the presented size (1125x2436): 20 layers over a background whose color alternates
+ * each frame; the time until the frame's color shows up in the target is the frame's latency. */
+static void full_screen(id<MTLDevice> dev)
+{
+	const int fw = 1125, fh = 2436;
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+										       width:fw height:fh mipmapped:NO];
+	td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	td.storageMode = MTLStorageModeShared;
+	id<MTLTexture> target = [dev newTextureWithDescriptor:td];
+	CALayer *root = [CALayer layer];
+	root.frame = CGRectMake(0, 0, fw, fh);
+	for (int i = 0; i < 20; i++) {
+		CALayer *l = [CALayer layer];
+		l.frame = CGRectMake(40 + (i % 4) * 260, 300 + (i / 4) * 300, 200, 200);
+		l.backgroundColor = rgb((i % 3) / 2.0, (i % 5) / 4.0, 0.5);
+		l.cornerRadius = 40;
+		l.opacity = 0.9;
+		[root addSublayer:l];
+	}
+	CARenderer *r = [CARenderer rendererWithMTLTexture:target options:nil];
+	[CATransaction begin];
+	r.layer = root;
+	r.bounds = CGRectMake(0, 0, fw, fh);
+	[CATransaction commit];
+	[CATransaction flush];
+	for (int frame = 0; frame < 6; frame++) {
+		int red = frame & 1;
+		[CATransaction begin];
+		root.backgroundColor = red ? rgb(1, 0, 0) : rgb(0, 0, 1);
+		[CATransaction commit];
+		[CATransaction flush];
+		CFTimeInterval t0 = CACurrentMediaTime();
+		[r beginFrameAtTime:t0 timeStamp:NULL];
+		[r addUpdateRect:r.bounds];
+		[r render];
+		[r endFrame];
+		CFTimeInterval t1 = CACurrentMediaTime();
+		uint8_t px[4];
+		int seen = 0;
+		while (CACurrentMediaTime() - t0 < 20) {
+			[target getBytes:px bytesPerRow:4 fromRegion:MTLRegionMake2D(5, 5, 1, 1) mipmapLevel:0];
+			if (red ? (px[2] > 200 && px[0] < 50) : (px[0] > 200 && px[2] < 50)) {
+				seen = 1;
+				break;
+			}
+			usleep(2000);
+		}
+		printf("frame %d (%s): CPU encode %.1f ms, on screen after %.1f ms%s\n", frame, red ? "red" : "blue",
+		       (t1 - t0) * 1e3, (CACurrentMediaTime() - t0) * 1e3, seen ? "" : " NOT SEEN");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	@autoreleasepool {
@@ -111,6 +164,7 @@ int main(int argc, char **argv)
 			      *b = px + ((H - 8) * W + 3 * W / 4) * 4;
 		printf("square %d %d %d %d, background %d %d %d %d, bar %d %d %d %d (BGRA)\n", c[0], c[1], c[2], c[3],
 		       e[0], e[1], e[2], e[3], b[0], b[1], b[2], b[3]);
+		full_screen(dev);
 		printf("CA_PROBE DONE\n");
 	}
 	return 0;

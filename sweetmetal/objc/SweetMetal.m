@@ -133,8 +133,7 @@ MISSING_LOGGER
 - (void)dealloc
 {
 	sm_compute_pipeline_release(_sm);
-	sm_function_release(_fn);
-	sm_library_release(_lib);
+	sm_function_release(_fn);   /* _lib belongs to the device's AIR cache */
 }
 
 - (id<MTLDevice>)device { return _device; }
@@ -385,6 +384,8 @@ MISSING_LOGGER
 @implementation SweetMTLDevice {
 	sm_device *_dev;
 	NSString *_name;
+	NSMutableDictionary<NSData *, NSValue *> *_air;   /* bitcode -> sm_library (kept for the device's life) */
+	NSMutableDictionary<NSString *, id> *_pipelines; /* descriptor key -> pipeline state */
 }
 
 - (sm_device *)sm { return _dev; }
@@ -426,6 +427,8 @@ MISSING_LOGGER
 	char name[128];
 	sm_device_name(_dev, name, sizeof name);
 	_name = [NSString stringWithFormat:@"SweetMetal (%s)", name];
+	_air = [NSMutableDictionary dictionary];
+	_pipelines = [NSMutableDictionary dictionary];
 	SMLOG("device up: %s, accelerator port %u", _name.UTF8String, port);
 	return self;
 }
@@ -489,25 +492,76 @@ MISSING_LOGGER
 	return b;
 }
 
-/* The AIR module of an _MTLFunction (Apple's library loader made it), as one sm library. */
-- (sm_library *)airLibraryFor:(id<MTLFunction>)function error:(NSError **)error
+/* The AIR bitcode of an _MTLFunction (Apple's library loader made it), or nil. */
+static NSData *bitcode(id<MTLFunction> function)
 {
 	id data = [(_MTLFunction *)function respondsToSelector:@selector(bitcodeData)] ? [(_MTLFunction *)function bitcodeData] : nil;
-	if (![data isKindOfClass:[NSData class]]) {
+	return [data isKindOfClass:[NSData class]] ? data : nil;
+}
+
+/* A short stable name for a function's code in pipeline cache keys: its name, length and hash. */
+- (NSString *)keyForFunction:(id<MTLFunction>)function
+{
+	NSData *bc = bitcode(function);
+	return function ? [NSString stringWithFormat:@"%@#%lu#%lx", function.name, (unsigned long)bc.length, (unsigned long)bc.hash]
+			: @"-";
+}
+
+/* The AIR module of an _MTLFunction as an sm library, translated once per distinct bitcode; the
+ * device keeps it (callers do not release it). */
+- (sm_library *)airLibraryFor:(id<MTLFunction>)function error:(NSError **)error
+{
+	NSData *bc = bitcode(function);
+	if (!bc) {
 		if (error)
 			*error = [NSError errorWithDomain:@"SweetMetal" code:2 userInfo:@{ NSLocalizedDescriptionKey :
-				[NSString stringWithFormat:@"no AIR bitcode for %@ (%@)", function.name, [data class]] }];
+				[NSString stringWithFormat:@"no AIR bitcode for %@", function.name] }];
 		return NULL;
 	}
-	NSData *bc = data;
+	@synchronized(_air) {
+		NSValue *v = _air[bc];
+		if (v)
+			return v.pointerValue;
+	}
 	sm_library *lib = sm_library_new_with_air(_dev, bc.bytes, bc.length);
-	if (!lib && error)
-		*error = sm_error([NSString stringWithFormat:@"AIR of %@", function.name]);
+	if (!lib) {
+		NSError *e = sm_error([NSString stringWithFormat:@"AIR of %@", function.name]);
+		if (error)
+			*error = e;
+		return NULL;
+	}
+	SMTRACE("translated %s (%lu bytes of AIR)", function.name.UTF8String, (unsigned long)bc.length);
+	@synchronized(_air) {
+		NSValue *v = _air[bc];
+		if (v) {
+			sm_library_release(lib);
+			return v.pointerValue;
+		}
+		_air[[bc copy]] = [NSValue valueWithPointer:lib];
+	}
 	return lib;
+}
+
+- (id)cachedPipeline:(NSString *)key
+{
+	@synchronized(_pipelines) {
+		return _pipelines[key];
+	}
+}
+
+- (void)cachePipeline:(id)p key:(NSString *)key
+{
+	@synchronized(_pipelines) {
+		_pipelines[key] = p;
+	}
 }
 
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function error:(NSError **)error
 {
+	NSString *key = [@"compute|" stringByAppendingString:[self keyForFunction:function]];
+	id cached = [self cachedPipeline:key];
+	if (cached)
+		return cached;
 	SMTRACE("compute pipeline %s", function.name.UTF8String);
 	sm_library *lib = [self airLibraryFor:function error:error];
 	sm_function *fn = lib ? sm_library_function(lib, function.name.UTF8String) : NULL;
@@ -516,10 +570,11 @@ MISSING_LOGGER
 		if (lib && error)
 			*error = sm_error([NSString stringWithFormat:@"compute pipeline %@", function.name]);
 		sm_function_release(fn);
-		sm_library_release(lib);
 		return nil;
 	}
-	return [[SweetMTLComputePipelineState alloc] initWithDevice:self lib:lib fn:fn pso:pso];
+	id p = [[SweetMTLComputePipelineState alloc] initWithDevice:self lib:lib fn:fn pso:pso];
+	[self cachePipeline:p key:key];
+	return p;
 }
 
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function

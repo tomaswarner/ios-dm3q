@@ -69,4 +69,7 @@ NSError *sm_error(NSString *what);
 @interface SweetMTLDevice : _MTLDevice <MTLDevice>
 @property (readonly) sm_device *sm;
 - (sm_library *)airLibraryFor:(id<MTLFunction>)function error:(NSError **)error;
+- (NSString *)keyForFunction:(id<MTLFunction>)function;
+- (id)cachedPipeline:(NSString *)key;
+- (void)cachePipeline:(id)p key:(NSString *)key;
 @end

@@ -429,6 +429,12 @@
   commitAndWaitUntilSubmitted, supportsVertexAmplificationCount:. Missing-selector fallback now fakes one
   word argument per ':'. Tracing: SWEETMETAL_TRACE=1. Note: CA recreates identical pipelines per draw
   (no cache yet) and the first frame takes seconds (lavapipe JIT).
+  **Caches + timing (same evening):** device caches translated AIR per distinct bitcode (NSData key; CA's
+  fixed_* functions come in several specializations = different AIR) and pipeline states per full descriptor
+  key (functions' name/length/hash, color formats + blend, depth/stencil, samples, vertex descriptor).
+  ca_probe full screen 1125x2436, 20 rounded translucent layers, 8 cores: first frame ~613 ms (lavapipe
+  JIT), steady frame ~50 ms (~20 fps, CPU), CA's encode 1-9 ms. (Frames 1/4 "NOT SEEN" = the probe renders
+  before CARenderer picks up the new transaction; nothing drawn, not a driver fault.)
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the

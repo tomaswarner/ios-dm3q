@@ -165,10 +165,8 @@ STATE_CLASS(SweetMTLDepthStencilState, MTLDepthStencilState, sm_depth_stencil, s
 - (void)dealloc
 {
 	sm_render_pipeline_release(_sm);
-	for (int i = 0; i < 2; i++) {
-		sm_function_release(_fns[i]);
-		sm_library_release(_libs[i]);
-	}
+	for (int i = 0; i < 2; i++)
+		sm_function_release(_fns[i]);   /* _libs belong to the device's AIR cache */
 }
 
 - (id<MTLDevice>)device { return _device; }
@@ -191,6 +189,33 @@ static void run_deallocator(void *bytes, uint64_t length, void *ctx)
 static void release_surface(void *bytes, uint64_t length, void *ctx)
 {
 	CFRelease((IOSurfaceRef)ctx);
+}
+
+/* Everything of a render pipeline descriptor the pipeline is made from, as a cache key. */
+static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
+{
+	NSMutableString *k = [NSMutableString stringWithFormat:@"render|%@|%@|%lu|%lu|%lu", [dev keyForFunction:d.vertexFunction],
+		[dev keyForFunction:d.fragmentFunction], (unsigned long)d.depthAttachmentPixelFormat,
+		(unsigned long)d.stencilAttachmentPixelFormat, (unsigned long)d.rasterSampleCount];
+	for (int i = 0; i < 8; i++) {
+		MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];
+		if (c.pixelFormat == MTLPixelFormatInvalid)
+			continue;
+		[k appendFormat:@"|c%d:%lu,%d,%lu,%lu,%lu,%lu,%lu,%lu,%lu", i, (unsigned long)c.pixelFormat, c.blendingEnabled,
+			(unsigned long)c.sourceRGBBlendFactor, (unsigned long)c.destinationRGBBlendFactor,
+			(unsigned long)c.rgbBlendOperation, (unsigned long)c.sourceAlphaBlendFactor,
+			(unsigned long)c.destinationAlphaBlendFactor, (unsigned long)c.alphaBlendOperation, (unsigned long)c.writeMask];
+	}
+	MTLVertexDescriptor *vd = d.vertexDescriptor;
+	for (int i = 0; vd && i < 31; i++) {
+		MTLVertexAttributeDescriptor *a = vd.attributes[i];
+		MTLVertexBufferLayoutDescriptor *l = vd.layouts[i];
+		if (a.format != MTLVertexFormatInvalid)
+			[k appendFormat:@"|a%d:%lu,%lu,%lu", i, (unsigned long)a.format, (unsigned long)a.offset, (unsigned long)a.bufferIndex];
+		if (l.stride)
+			[k appendFormat:@"|l%d:%lu,%lu,%lu", i, (unsigned long)l.stride, (unsigned long)l.stepFunction, (unsigned long)l.stepRate];
+	}
+	return k;
 }
 
 @implementation SweetMTLDevice (Render)
@@ -302,6 +327,10 @@ static sm_stencil_desc stencil_desc(MTLStencilDescriptor *s)
 
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)error
 {
+	NSString *key = render_key(self, d);
+	id cached = [self cachedPipeline:key];
+	if (cached)
+		return cached;
 	SMTRACE("render pipeline %s/%s color0 %lu", d.vertexFunction.name.UTF8String, d.fragmentFunction.name.UTF8String,
 		(unsigned long)d.colorAttachments[0].pixelFormat);
 	sm_library *libs[2] = { NULL, NULL };
@@ -346,12 +375,14 @@ static sm_stencil_desc stencil_desc(MTLStencilDescriptor *s)
 			*error = e;
 		goto fail;
 	}
-	return [[SweetMTLRenderPipelineState alloc] initWithDevice:self sm:p libs:libs fns:fns];
-fail:
-	for (int i = 0; i < 2; i++) {
-		sm_function_release(fns[i]);
-		sm_library_release(libs[i]);
+	{
+		SweetMTLRenderPipelineState *state = [[SweetMTLRenderPipelineState alloc] initWithDevice:self sm:p libs:libs fns:fns];
+		[self cachePipeline:state key:key];
+		return state;
 	}
+fail:
+	for (int i = 0; i < 2; i++)
+		sm_function_release(fns[i]);
 	return nil;
 }
 
