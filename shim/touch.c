@@ -313,6 +313,7 @@ static int gpi_wait(uint64_t end)
 
 static int gpi_ok;
 static uint32_t gpi_clk_level;
+static uint32_t spi_loopback;		/* CONFIG0 bit 8: SE internal TX->RX loop */
 
 /*
  * gcc_qupv3_wrap1_s4_clk_src is a DFS RCG on sm8550 (gcc_dfs_clocks[]): with
@@ -442,13 +443,12 @@ static uint32_t last_fail_status, last_fail_irq, last_fail_fifo, after_tx_status
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 {
 	if (gpi_ok) {
-		/* touch16: a 6-byte TX shifted 4 bytes (GP_LENGTH 4, TX FIFO empty) and
-		 * waited forever for the rest: the partial last FIFO word never reaches
-		 * the serializer.  Pad every GPI transfer to whole 32-bit words. */
+		/* exact length: the 6-of-8-bytes stall (touch16) was the bisect's TX DMA
+		 * TRE without IEOT (no EOT, the partial word waited); padding wrote
+		 * extra registers in the IC (FA 20 00 00 24 81 00 00 hits 0x25/0x26) */
 		unsigned n_req = n;
-		n = (n + 3) & ~3u;
 		for (unsigned i = 0; i < n; i++) {
-			dma_tx[i] = i < n_req ? tx[i] : 0;
+			dma_tx[i] = tx[i];
 			dma_rx[i] = 0xee;
 		}
 		dcache_flush(dma_tx, sizeof(dma_tx));
@@ -460,7 +460,7 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		ch_queue(1, (uint32_t)rxp, (uint32_t)(rxp >> 32), n, TRE_DMA << 16);	/* no IEOT on RX (downstream) */
 		ch_ring_db(1);
 		/* TX: CONFIG0 (8-bit word, mode 0, packing, clk src 0 div 2), GO duplex, DMA */
-		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+		ch_queue(0, (8 - 4) | spi_loopback << 8 | 1u << 24 | 1u << 25, 0, gpi_clk_level << 16 | 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
 		ch_queue(0, 3u /* SPI_DUPLEX */, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
 		ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(0);
@@ -658,6 +658,23 @@ void touch_probe(void)
 
 	con_hex2("PINS", "irq25=", rd(TLMM + 25 * 0x1000UL + 4) & 1, "cs47=", rd(TLMM + 47 * 0x1000UL + 4));
 
+	/* 3b. SoC-side check: SE loopback must echo the pattern */
+	{
+		static const uint8_t pat[6] = { 0xa5, 0x5a, 0x12, 0x34, 0xc3, 0x3c };
+		spi_loopback = 1;
+		int lrc = spi_xfer(pat, rbuf, 6);
+		spi_loopback = 0;
+		con_hex2("SPI LOOP", "rc=", (uint32_t)lrc, "rx=", be(rbuf, 0, 1, 2, 3));
+		con_hex2("SPI LOOP", "rx4..5=", (uint32_t)rbuf[4] << 8 | rbuf[5], "miso pin=", rd(TLMM + 44 * 0x1000UL + 4) & 1);
+	}
+	/* 3c. hardware chip id (stm_ts_read_chip_id_hw): FB 20 00 00 00, data at rx[6] */
+	{
+		static const uint8_t hw[14] = { 0xfb, 0x20, 0x00, 0x00, 0x00 };
+		int hrc = spi_xfer(hw, rbuf, 14);
+		con_hex2("STM HWID", "rc=", (uint32_t)hrc, "raw0..3=", be(rbuf, 0, 1, 2, 3));
+		con_hex2("STM HWID", "id=", be(rbuf, 6, 7, 8, 9), "", be(rbuf, 10, 11, 12, 13));
+	}
+
 	/* 4. STM: system reset, wait for READY (status event, type INFO, id 0) */
 	static const uint8_t rst[6] = { 0xfa, 0x20, 0x00, 0x00, 0x24, 0x81 };
 	int rc = stm_write(rst, 6);
@@ -680,6 +697,11 @@ void touch_probe(void)
 		con_hex2("EV", "w2=", gpi_evlog[i][2], "w3=", gpi_evlog[i][3]);
 	}
 	con_hex2("STM EV", "", be(ev, 0, 1, 2, 3), "", be(ev, 4, 5, 6, 7));
+	{
+		static const uint8_t crc[7] = { 0xfb, 0x20, 0x00, 0x00, 0x78 };	/* fw corruption check */
+		int crc_rc = spi_xfer(crc, rbuf, 7);
+		con_hex2("STM CRC", "rc=", (uint32_t)crc_rc, "val=", rbuf[6]);
+	}
 	uint8_t id[8] = { 0 };
 	rc = stm_read_reg(0x22, id, 5);		/* STM_TS_READ_DEVICE_ID */
 	con_hex2("STM ID", "rc=", (uint32_t)rc, "id=", be(id, 0, 1, 2, 3));
