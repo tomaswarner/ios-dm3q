@@ -1,0 +1,12 @@
+diff -ruN a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/SWEET.h	2026-10-21 00:24:18
++++ b/pexpert/pexpert/arm64/SWEET.h	2026-10-21 00:24:18
+@@ -52,7 +52,7 @@
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+ 
+-#define GICR_PE_SIZE              0x20000 // Size of each redistributor region
++#define GICR_PE_SIZE              0x40000 // DM3Q: DT redistributor-stride (GICv4 RD+SGI+VLPI+reserved frames)
+ 
+ /* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
+ #define GICD_CTLR                 0x0

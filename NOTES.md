@@ -179,6 +179,9 @@
   with boot-arg `sweetfb_fill=1`, scales layers x fWidth/fLogicalW (32/25) nearest-neighbour, vertically
   centred (~15 rows cropped each end), duplicate rows memcpy'd. Heartbeat now off unless `sweethb=1`.
   GUI boots also drop `-enable_kprintf_spam` (kprintf bypasses the console mute and draws over the GUI).
+- **Patch 0103:** SWEET.h GICR_PE_SIZE 0x20000 -> 0x40000 (DM3Q redistributor-stride). With 0x20000 the
+  per-CPU redistributor walk (pe_fiq.c find_gicr_pe_base) only worked for CPU0. Needed for cpus>1
+  (0065/0078 PSCI SMP; ADT CPU regs 0x000..0x700 match the SM8550 MPIDRs).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
