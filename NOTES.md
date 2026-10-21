@@ -260,6 +260,8 @@
   check) -> `apple/ios16-root-20H392-nogl.img/.simg`. Boot image `shim/out/dm3q-x15s-boot.img` = kernel
   out-dm3q-008 (0105 keys + 0106 opaque black) + `cs_enforcement_disable=1`. TODO on the phone: flash
   USERDATA nogl.simg + BOOT x15s, enable Bold Text, check SpringBoard survives (icons may lose styling).
+  **CONFIRMED 2026-10-21 (user, root test2 = clean + nogl patch, boot x19s): Bold Text works, SpringBoard
+  survives** (no green-screen crash loop). Milestone A step 1 done.
   Metal RE: driver classes subclass IOGPUMetal* (IOGPU.framework); shader backend = plugin dlopened by
   MTLCompiler with C ABI MTLCompilerCreate/Delete/BuildRequest(WithOptions|WithSerializedBitcode)/ReleaseReply
   (A11: AGXCompilerCore.framework); MTLCompilerService XPC exists.
