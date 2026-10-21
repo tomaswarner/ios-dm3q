@@ -390,19 +390,32 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 		ch_ring_db(1);
 		if (first) {
 			udelay(3000000);
-			con_hex2("GPI STEP", "2 rx db ok st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state(), "glob=", rd(GLOB_IRQ_STTS));
+			con_hex2("GPI STEP", "2 rx db ok st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state(), "rxrp=", rd(CH_CNTXT(1) + 0x10));
 			udelay(3000000);
+			/* TX one TRE per doorbell: which one kills the SoC? */
+			ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
+			ch_ring_db(0);
+			udelay(3000000);
+			con_hex2("GPI STEP", "3 config0 ok txrp=", rd(CH_CNTXT(0) + 0x10), "err=", rd(GPII_ERR));
+			udelay(3000000);
+			ch_queue(0, 3u, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
+			ch_ring_db(0);
+			udelay(3000000);
+			con_hex2("GPI STEP", "4 go ok txrp=", rd(CH_CNTXT(0) + 0x10), "st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state());
+			udelay(3000000);
+			ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
+			ch_ring_db(0);
+			udelay(3000000);
+			con_hex2("GPI STEP", "5 dma ok txrp=", rd(CH_CNTXT(0) + 0x10), "evrp=", rd(EV_CNTXT + 0x10));
+			first = 0;
+			goto wait;
 		}
 		/* TX: CONFIG0 (8-bit word, mode 0, packing, clk src 0 div 2), GO duplex, DMA */
 		ch_queue(0, (8 - 4) | 1u << 24 | 1u << 25, 0, 2u, TRE_CONFIG0 << 16 | TF_CHAIN);
 		ch_queue(0, 3u /* SPI_DUPLEX */, 0, 0, TRE_GO << 16 | TF_CHAIN | TF_LINK);
 		ch_queue(0, (uint32_t)txp, (uint32_t)(txp >> 32), n, TRE_DMA << 16 | TF_IEOT);
 		ch_ring_db(0);
-		if (first) {
-			udelay(3000000);
-			con_hex2("GPI STEP", "3 tx db ok st=", ch_state(0) << 8 | ch_state(1) << 4 | ev_state(), "evrp=", rd(EV_CNTXT + 0x10));
-			first = 0;
-		}
+	wait:;
 		int done = gpi_wait(ticks() + 19200000 / 10);
 		udelay(2);
 		cs(1);
