@@ -205,6 +205,17 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **GPU research (2026-10-21, subagent, notes in /private/tmp/claude-501/gpu-research/):** Metal device =
+  `_MTLRegisterDevices` matches IOKit `IOAcceleratorES`, reads `MetalPluginName`/`MetalPluginClassName`, loads
+  `/System/Library/Extensions/<name>.bundle`, class must subclass `_MTLDevice`, `initWithAcceleratorPort:`
+  (A11: AGXMetalA11 in the cache, MTLIOAccelDevice -> IOGPU.framework user client: IOGPUDeviceCreate struct
+  sel 1, submit sel 0x1a/0x21, shmem segment lists, IOSurface graphics comm page). A fake IOAcceleratorES
+  + own ad-hoc-signed bundle would load (sweet_amfi marks root-fs code platform), but a Metal impl needs an
+  AIR compiler (multi-month). No software MTLDevice on device (MTLSimDriver = Simulator only). Adreno 740:
+  chip 0x43050a01, a740_sqe.fw + gmu_gen70200.bin + a740_zap.mbn (linux-firmware), GPU 0x3d00000, GMU
+  0x3d6a000, GDSCs CX/GX, zap via SCM/PAS. Plan: A) make CA/CoreImage take CA::OGL::SW / software CI
+  instead of the empty EAGL path (days-2 wks); DPU scaling (2-4 wks); C) Adreno CP bring-up (1-3 months);
+  B) Metal (6+ months).
 - **Green screen = SpringBoard crash loop after the user enabled Accessibility > Bold Text (x10s/x11s/x12s,
   log viewer IMG_5796-5798).** CRASH SpringBoard sig 11 pc 0 at CI::GLContext::init+204 (GetMacroContext ->
   glDisable(GL_DEPTH_TEST) through an all-zero GL dispatch) <- CIContext contextWithOptions <-
