@@ -358,6 +358,37 @@
   The bundle maps an IOSurface as a no-copy buffer at IOSurfaceGetBaseAddress and makes plane textures over
   it. smoke `surface`: render into a texture over mmap'd host pages (plane at 256, rows 64 B apart) -> CPU
   sees 64/64 texels in the pages, padding untouched, deallocator ran. Host OK; phone pending (same command).
+  **Metal device registration RE (iOS 16.7 20H392 Metal, done 2026-10-21 ~19:30, `ipsw dyld disass`):**
+  MTLCreateSystemDefaultDevice block 0x181a37050 returns `_deviceArray[0]` when exactly one device (else
+  MTLReportFailure). The array is filled once by MTLDeviceArrayInitialize (0x181a34050: env/defaults for
+  capture/HUD/debug wrappers, then `_MTLRegisterDevices` 0x181b144c8): IOServiceGetMatchingServices(
+  IOServiceMatching("IOAcceleratorES")); per service `getMetalPluginClassForService` 0x181a3c7c8 = registry
+  string `MetalPluginName` -> NSBundle `/System/Library/Extensions/<name>.bundle`; class = `classNamed:`
+  registry string `MetalPluginClassName`, else the bundle's principalClass; must be a subclass of `_MTLDevice`;
+  then `[[cls alloc] initWithAcceleratorPort:service]` -> `MTLAddDevice` (non-nil only).
+  `-[_MTLDevice initWithAcceleratorPort:]` = doesNotRecognizeSelector (abstract); `-[_MTLDevice init]`
+  needs no kernel (queues, MTLLibraryBuilder, serialization paths, MTLLoader, resource list pool). So the
+  kernel side is only an IOService of class (or subclass of) `IOAcceleratorES` with those two string
+  properties; the bundle may ignore the port (lavapipe needs no kernel).
+  **Template: Apple's own non-AGX driver MTLSimDriver** (iOS 27 sim runtime on this Mac, cryptex mount
+  .../SimulatorRuntime-v24.1.434.0.*/.../RuntimeRoot/System/Library/PrivateFrameworks/MTLSimDriver.framework,
+  class-dump in /private/tmp/claude-501/gpu-research/MTLSimDriver.h): MTLSimDevice : _MTLDevice, CommandQueue :
+  _MTLCommandQueue, CommandBuffer : _MTLCommandBuffer, ComputePipelineState / RenderPipelineState /
+  DepthStencilState / SamplerState / Heap : their _MTL* bases, Buffer/Texture/Function : NSObject + protocols
+  (MTLBufferSPI, MTLTextureSPI...). It does NOT override library loading (uses _MTLDevice's: newLibraryWithData:,
+  newDefaultLibrary..., _MTLLibrary/_MTLFunction); it plugs into the compiler (compiler, *FunctionKey*,
+  new{Vertex,Fragment,Compute}VariantWithCompilerOutput:) - the AGX-style path we want to avoid.
+  iOS 16 `_MTLFunction` has `bitcodeData` (+ bitCodeOffset/FileSize/Hash, libraryData). The iPhoneOS SDK's
+  Metal.tbd exports _MTLDevice/_MTLFunction/_MTLCommandQueue/... as objc classes, so the bundle can link them.
+  **Bundle design (proposed):** SweetMTLDevice : _MTLDevice, initWithAcceleratorPort: -> [super init] +
+  sm_device_create; keep Apple's library loading; override the public pipeline entry points
+  (newRenderPipelineStateWithDescriptor:error: / options:reflection:error: / completionHandler variants,
+  newComputePipelineStateWithFunction:... / WithDescriptor:...) to take each _MTLFunction's `bitcodeData` ->
+  sm_library_new_with_air (cache by bitCodeHash) -> sm_*_pipeline_new; queue/command buffer subclass
+  _MTLCommandQueue/_MTLCommandBuffer like MTLSimDriver; buffers/textures NSObject<MTLBufferSPI/MTLTextureSPI>.
+  Open: function-constant specialization (_MTLLibrary newFunctionWithName:constantValues: goes to the
+  compiler) - handle in our device; test first with a phone-side program that loads the bundle and calls
+  initWithAcceleratorPort:0 directly (no kernel change), then the kernel IOAcceleratorES nub behind sweetmetal=1.
   NEXT: the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)
