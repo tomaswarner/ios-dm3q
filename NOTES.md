@@ -205,6 +205,12 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **TOUCH WORKS in the shim (touch20, IMG_5795, 2026-10-21):** the STM IC was unpowered. S2DOS05
+  (display PMIC, i2c-gpio SDA GPIO20 / SCL GPIO21, addr 0x60) EN reg 0x03 read 0x19 (L2/L3 off);
+  RMW to 0x1F (LDO2 tsp_io 1.8 V bit 1, LDO3 tsp_avdd 3.0 V bit 2) -> HW id 36 40 01 00, ready on the
+  first try, device id 53544036, FW 0135 0020, live coordinate events (0-4095). SE loopback (CONFIG0
+  bit 8) echoes = SoC side verified. NEXT: kernel driver = S2DOS05 power + GPI SPI + STM protocol
+  feeding SweetHIDTouch (replace sweet's GENI-I2C Goodix path), scale 4096x4096 -> 1125x2436.
 - **Touch SPI over GPI works (touch5-18, 2026-10-21):** recipe in `shim/touch.c`:
   SE4 GPI mode (DMA_MODE_EN=1, GSI_EVENT_EN=0xf, SE_IRQ_EN=0); GPII 1 at `0x9f0000 + 0x20000 + 0x4000*n`
   (ee_base = 0xa00000 - 0x10000); SMMU: SIDs 0xb6 (GPI) AND 0xa3 (QUP wrapper, SE DMA data) need an
