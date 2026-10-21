@@ -141,6 +141,10 @@
   `cannot mount root, errno = 19` retried. Heartbeat rate normal (n 0x4194 at t 0x6d). Link was PWM-G1 after
   link startup (sweet's ABL left HS) -> `ufs_power_hs(4)`: PA_{RX,TX}GEAR 4, lanes 2, termination, HSSERIES B,
   TXHSADAPTTYPE initial, PA_PWRMODE 0x11, wait IS.UPMS, HCS.UPMCRS == 1. Test `shim/out/dm3q-ufs10-boot.img`.
+- **ufs10 result (IMG_5741):** HS-G4 power mode change accepted (rc 0, UPMCRS 1, PA_PWRMODE 0x11, gears 4/4)
+  but TUR/CAP/READ then all time out. G4 needs more (Linux pwr_change_notify / adapt / PHY HS tables).
+  ufs11: `ufs_pick_gear` walks HS-G1..G4 rate B with a TUR after each, keeps the highest that works
+  (falls back to PWM-G1).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

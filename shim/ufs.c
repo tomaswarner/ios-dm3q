@@ -617,7 +617,8 @@ void test_ufs_wake(void)
 	ufs_bringup_device();
 }
 
-static void ufs_power_hs(uint32_t gear);
+static int ufs_power_hs(uint32_t gear);
+static void ufs_pick_gear(void);
 
 /* Link is up: our list, NOP OUT, SSU Active, fDeviceInit, HS gear, TUR, capacity, GPT (read-only). */
 static void ufs_bringup_device(void)
@@ -657,8 +658,10 @@ static void ufs_bringup_device(void)
 	}
 	con_hex2("FDEVINIT", "set=", set, "now=", val << 8 | tries);
 
-	/* link_startup leaves PWM-G1 (< 1 MB/s): switch to HS-G4 rate B x2 like U-Boot/Linux */
-	ufs_power_hs(4);
+	/* link_startup leaves PWM-G1 (< 1 MB/s). dm3q ufs10: HS-G4 is accepted (UPMCRS 1, pwrmode
+	 * 0x11, 4/4) but then every command times out (G4 needs adaptation/calibration we lack);
+	 * keep the highest gear that still works. */
+	ufs_pick_gear();
 
 	/* 6. SCSI on LUN 0: TUR (unit attention first), capacity, GPT */
 	stage_str("ufs scsi");
@@ -873,7 +876,7 @@ void test_ufs_linux(void)
 /* ufshcd_change_power_mode (U-Boot): HS gear, 2 lanes, termination, rate B, FAST/FAST */
 #define IS_UPMS		(1u << 4)
 
-static void ufs_power_hs(uint32_t gear)
+static int ufs_power_hs(uint32_t gear)
 {
 	stage_str("ufs pwrmode");
 	uint32_t e = 0;
@@ -897,6 +900,39 @@ static void ufs_power_hs(uint32_t gear)
 	dme_get_val(0x1571, &pm);
 	dme_get_val(0x1568, &tg);
 	dme_get_val(0x1583, &rg);
-	con_hex2("HSGEAR", "rc/upmcrs=", rc << 8 | upmcrs, "set err=", e);
-	con_hex2("HSGEAR", "pwrmode=", pm, "tx/rx gear=", tg << 8 | rg);
+	con_hex2("HSGEAR", "g/rc/upm=", gear << 16 | rc << 8 | upmcrs, "pm/tx/rx=", pm << 16 | tg << 8 | rg | e << 24);
+	return !rc && upmcrs == 1;
+}
+
+/* Walk HS-G1..G4 (rate B): keep the highest gear where TEST UNIT READY still completes. */
+static void ufs_pick_gear(void)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0, best = 0;
+	for (uint32_t g = 1; g <= 4; g++) {
+		if (!ufs_power_hs(g))
+			break;
+		uint32_t rc = 1;
+		for (int i = 0; i < 3 && rc; i++)	/* first one may be a unit attention */
+			rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st);
+		con_hex2("GEARTUR", "gear=", g, "rc/ocs/st=", rc << 16 | ocs << 8 | st);
+		if (rc)
+			break;
+		best = g;
+	}
+	if (best && best < 4) {
+		ufs_power_hs(best);		/* step back to the last gear that worked */
+	} else if (!best) {
+		dme_set(0x1583, 1);		/* back to PWM-G1 (SLOW_MODE 2) */
+		dme_set(0x1568, 1);
+		dme_set(0x1584, 0);
+		dme_set(0x1569, 0);
+		ufs_wr(REG_IS, IS_UPMS);
+		dme_set(0x1571, 0x22);
+		uint64_t t0 = ticks();
+		while (!(ufs_rd(REG_IS) & IS_UPMS) && ticks() - t0 < 19200000)
+			;
+		ufs_wr(REG_IS, IS_UPMS);
+	}
+	con_hex2("GEAR", "best HS=", best, "(0 = PWM-G1)", 0);
 }
