@@ -165,6 +165,10 @@
 - **Boot x6 (writable root, IMG_5747): no panic; backboardd runs**, console flooded with
   `[backboardd] IOServiceMatchingfailed for: AppleM2ScalerCSCDriver` (no hardware scaler; harmless spam).
   x7 = x6 + `sweetfb_noconsole=1 sweetfb_hz=30` (README) so the CPU-copied CoreAnimation frames are visible.
+- **x7: console still drawn** -> AppleCLCD::present() never ran (sweet_console_muted is set on the first
+  present). backboardd loops on AppleM2ScalerCSCDriver: AppleCLCD presented the native 1440x3088 because the
+  iPhone X size (1125x2436) was only used for panels <= that size. Patch **0101**: always present 1125x2436
+  (unless sweetfb_native=1), centered via negative fOffX/fOffY (-157/-326) in present().
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

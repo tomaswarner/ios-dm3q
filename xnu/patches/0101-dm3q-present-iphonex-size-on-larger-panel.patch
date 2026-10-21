@@ -1,0 +1,18 @@
+diff -ruN a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-21 00:07:22
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-21 00:07:22
+@@ -170,7 +170,13 @@
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	/*
++	 * DM3Q: the 1440x3088 panel is larger than the iPhone X; present the
++	 * iPhone X size anyway (the iPhone X userland otherwise looks for the
++	 * M2Scaler hardware scaler forever) and center it: negative fOffX/fOffY
++	 * shift the layers into the middle of the panel in present().
++	 */
++	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
