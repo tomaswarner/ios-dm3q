@@ -1,0 +1,61 @@
+diff -ruN a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c	2026-10-21 12:03:43
++++ b/bsd/dev/sweet_usb.c	2026-10-21 12:03:43
+@@ -81,6 +81,18 @@
+ 	{ "phy-com-aux", 0x39064 },
+ };
+ extern int sweet_smmu_route_like(uint32_t sid, uint32_t like);
++static bool usb_dm3q;
++/*
++ * dm3q x16s: DCTL.CSFTRST never cleared ("soft reset STUCK after 500 ms").
++ * GSNPSID 0x3331xxxx = DWC_usb31, whose soft reset ends only once all clocks
++ * are in sync (Linux dwc3_core_soft_reset), and the USB3 pipe clock is off
++ * (probe usb1; QSCRATCH GENERAL_CFG 0x4: PIPE_UTMI_CLK_SEL clear). Use the UTMI
++ * clock as the pipe clock, as dwc3-qcom.c dwc3_qcom_select_utmi_clk() does.
++ */
++#define QSCRATCH_GENERAL_CFG    0x08
++#define PIPE_UTMI_CLK_SEL       (1u << 0)
++#define PIPE3_PHYSTATUS_SW      (1u << 3)
++#define PIPE_UTMI_CLK_DIS       (1u << 8)
+ 
+ #define DWC3_PA                 0x0a600000
+ #define DWC3_SIZE               0x0000d000
+@@ -113,6 +125,7 @@
+ 		return;
+ 	}
+ 	bool dm3q = enabled == 3;
++	usb_dm3q = dm3q;
+ 	gdscr = usb_rd(gcc, dm3q ? DM3Q_GCC_USB30_PRIM_GDSCR : GCC_USB30_PRIM_GDSCR);
+ 	printf("SWEET USB: GDSC usb30_prim 0x%08x (%s)%s\n", gdscr, (gdscr & (1u << 31)) ? "on" : "off",
+ 	    dm3q ? " [dm3q]" : "");
+@@ -901,6 +914,20 @@
+ 	ud.dma_pa = ptoa_64(pn);
+ 	ud_if_create();
+ 
++	if (usb_dm3q) {
++		vm_offset_t q = ml_io_map(QSCRATCH_PA, 0x100);
++		if (q != 0) {
++			volatile uint32_t *cfg = (volatile uint32_t *)(q + QSCRATCH_GENERAL_CFG);
++			uint32_t before = *cfg;
++			*cfg = *cfg | PIPE_UTMI_CLK_DIS;
++			delay(500);
++			*cfg = *cfg | PIPE_UTMI_CLK_SEL | PIPE3_PHYSTATUS_SW;
++			delay(500);
++			*cfg = *cfg & ~PIPE_UTMI_CLK_DIS;
++			__asm__ volatile ("dsb sy" ::: "memory");
++			printf("SWEET USB: dm3q UTMI as pipe clock: GENERAL_CFG 0x%08x -> 0x%08x\n", before, *cfg);
++		}
++	}
+ 	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+ 	dwc_wr(DCTL, DCTL_CSFTRST);
+ 	int i;
+@@ -909,6 +936,9 @@
+ 	}
+ 	printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
+ 	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
++	if (usb_dm3q && !(dwc_rd(DCTL) & DCTL_CSFTRST)) {
++		delay(50000);                   /* DWC_usb31 <= 1.80a: 50 ms before touching the PHY domain */
++	}
+ 	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
+ 		return;
+ 	}

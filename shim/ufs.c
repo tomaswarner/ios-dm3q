@@ -1010,6 +1010,58 @@ void ufs_logview(void)
 		con_hex2("LOGVIEW", "odd ring size=", size, "", 0);
 		return;
 	}
+#if defined(DIAG_LOGGREP)
+	/* whole ring, keep only lines containing "SWEET USB" (they come early in a boot) */
+	{
+		static const char pat[] = "SWEET USB";
+		static char line[512], keep[TXT_ROWS][TXT_COLS + 1];
+		uint32_t nk = 0, ll = 0, valid = total < size ? (uint32_t)total : size;
+		uint64_t from = total - valid;
+		static uint8_t one[BLOCK] __attribute__((aligned(4096)));
+		uint32_t cur = 0xffffffffu;
+		for (uint32_t i = 0; i < valid; i++) {
+			uint32_t off = (uint32_t)((from + i) % size), blk = off / BLOCK;
+			if (blk != cur) {
+				if (read_blocks(base + 1 + blk, 1, one))
+					break;
+				cur = blk;
+			}
+			char ch = (char)one[off % BLOCK];
+			if (ch != '\n' && ll < sizeof(line) - 1) {
+				line[ll++] = ch;
+				continue;
+			}
+			line[ll] = 0;
+			int hit = 0;
+			for (uint32_t j = 0; j + sizeof(pat) - 1 <= ll && !hit; j++) {
+				uint32_t k = 0;
+				while (k < sizeof(pat) - 1 && line[j + k] == pat[k])
+					k++;
+				hit = k == sizeof(pat) - 1;
+			}
+			if (hit) {
+				if (nk == TXT_ROWS - 1) {        /* keep the newest rows */
+					for (uint32_t r = 1; r < nk; r++)
+						for (uint32_t c = 0; c <= TXT_COLS; c++)
+							keep[r - 1][c] = keep[r][c];
+					nk--;
+				}
+				uint32_t c = 0;
+				for (; c < ll && c < TXT_COLS; c++)
+					keep[nk][c] = line[c];
+				keep[nk][c] = 0;
+				nk++;
+			}
+			ll = 0;
+		}
+		con_clear(0xff000000u);
+		for (uint32_t r = 0; r < nk; r++)
+			for (int c = 0; keep[r][c]; c++)
+				small_char(c, r, keep[r][c], 0xffffffffu);
+		con_hex2("LOGGREP", "lines=", nk, "ring bytes=", valid);
+		return;
+	}
+#endif
 	/* tail: the last n bytes [total-n, total); read the blocks covering them (wrap-aware) */
 	uint32_t n = total < TAIL_BYTES ? (uint32_t)total : TAIL_BYTES;
 	uint64_t start = total - n;
