@@ -83,6 +83,14 @@
   device reset must go another way (SCM/hyp call? or not needed). Probe `shim/out/dm3q-ufs6-boot.img`:
   no pin; HCE 0->1, DME_LINKSTARTUP, NOP OUT, SSU Active (1b 00 00 00 11 00) to W-LUN 0xD0, fDeviceInit,
   TUR/CAP, GPT.
+- **ufs6 result (IMG_5730):** after HCE 0->1: HCS 0x08 (UCRDY, no DP). DME_LINKSTARTUP: rc 0xFF (no UIC
+  completion in 1 s), then 0xFE (UCRDY gone, HCS 0); IS 0x4 (UIC error), UECPA 0x80000010 (PHY adapter
+  error). => the link cannot come up without a Linux-style power-up. **Next work (the real UFS port):**
+  (1) RPMh votes for the device rails/clock (vcc ldob17 2.5 V, vccq ldog1 1.2 V + parent smpg4, ref clk
+  ldog3/rpmh clk) -- reuse sweet_rpmh.c (cmd-db lookup), likely ABL dropped them (H8 exit also failed);
+  (2) QMP UFS PHY init at 0x1d80000 with Linux phy-qcom-qmp-ufs.c sm8550 tables (serdes/tx/rx/pcs);
+  (3) HCE, link startup, NOP, fDeviceInit (already written in shim/ufs.c test_ufs_wake). Device RST_n is
+  off limits (TLMM page resets the SoC). Recovery is always just a reboot: ABL re-inits UFS for Android.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
