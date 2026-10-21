@@ -11,30 +11,9 @@
  * Slice 1: device, buffers, command queue/buffer (synchronous submit), compute pipelines and
  * encoders. Any selector a client sends that is not implemented is logged with its class
  * (SWEETMETAL missing: ...) before the usual exception, to drive what comes next. */
-#import <Foundation/Foundation.h>
-#import <Metal/Metal.h>
-#include <stdio.h>
-#include "sweetmetal.h"
+#import "SweetMetalPrivate.h"
 
-@interface _MTLDevice : NSObject
-- (instancetype)init;
-@end
-
-@interface _MTLFunction : NSObject
-- (id)bitcodeData;
-- (NSString *)name;
-@end
-
-#define SMLOG(...) do { fprintf(stderr, "SWEETMETAL " __VA_ARGS__); fputc('\n', stderr); } while (0)
-
-#define MISSING_LOGGER \
-	-(void)doesNotRecognizeSelector:(SEL)sel \
-	{ \
-		SMLOG("missing: -[%s %s]", object_getClassName(self), sel_getName(sel)); \
-		[super doesNotRecognizeSelector:sel]; \
-	}
-
-static NSError *sm_error(NSString *what)
+NSError *sm_error(NSString *what)
 {
 	NSString *msg = [NSString stringWithFormat:@"%@: %s", what, sm_last_error()];
 	SMLOG("%s", msg.UTF8String);
@@ -42,10 +21,6 @@ static NSError *sm_error(NSString *what)
 }
 
 /* ---- buffers ------------------------------------------------------------------------------ */
-
-@interface SweetMTLBuffer : NSObject <MTLBuffer>
-@property (readonly) sm_buffer *sm;
-@end
 
 @implementation SweetMTLBuffer {
 	id<MTLDevice> _device;
@@ -199,10 +174,6 @@ MISSING_LOGGER
 MISSING_LOGGER
 @end
 
-@interface SweetMTLCommandBuffer : NSObject <MTLCommandBuffer>
-- (instancetype)initWithQueue:(id<MTLCommandQueue>)queue cb:(sm_command_buffer *)cb;
-@end
-
 @implementation SweetMTLCommandBuffer {
 	id<MTLCommandQueue> _queue;
 	sm_command_buffer *_cb;
@@ -232,6 +203,8 @@ MISSING_LOGGER
 	sm_command_buffer_release(_cb);
 }
 
+- (sm_command_buffer *)sm { return _cb; }
+- (NSMutableArray *)held { return _held; }
 - (id<MTLDevice>)device { return _queue.device; }
 - (id<MTLCommandQueue>)commandQueue { return _queue; }
 - (BOOL)retainedReferences { return YES; }
@@ -347,13 +320,12 @@ MISSING_LOGGER
 
 /* ---- device ------------------------------------------------------------------------------- */
 
-@interface SweetMTLDevice : _MTLDevice <MTLDevice>
-@end
-
 @implementation SweetMTLDevice {
 	sm_device *_dev;
 	NSString *_name;
 }
+
+- (sm_device *)sm { return _dev; }
 
 - (instancetype)initWithAcceleratorPort:(unsigned int)port
 {

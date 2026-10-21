@@ -401,7 +401,12 @@
   default.metallib through our device (141 functions, 39/95/7, every newFunctionWithName OK); compute
   pipelines compute_apl, compute_apl_fast, sum_apl_and_compute_dimming_factor OK; tile_downsample_{1,2,4,8}
   = NeedsInput(TileAttachments) (tile shaders, need a render pass). MTLCreateSystemDefaultDevice still nil
-  (no IOAcceleratorES). Build: see the commands in the commit; dylib 29 MB (static libsweetmetal).
+  (no IOAcceleratorES). Build: `sweetmetal/objc/build.sh` (dylib 29 MB, static libsweetmetal; probe; test
+  metallib). Metal Toolchain installed (`xcodebuild -downloadComponent MetalToolchain`): `xcrun -sdk iphoneos
+  metal -target air64-apple-ios16.0`; test shaders `sweetmetal/tests/sweetmetal_test.metal`.
+  **First full Metal program on the S23 (19:20):** newLibraryWithURL (real Apple-compiled metallib) ->
+  newFunctionWithName -> newComputePipelineStateWithFunction -> queue/command buffer/encoder ->
+  dispatchThreadgroups -> commit/waitUntilCompleted: scale_and_offset 1024/1024, status Completed, handler ran.
   NEXT: the
   ObjC SweetMetal.bundle (MTLDevice etc. over this API) + IOAcceleratorES nub; a SWEETLOG dump tool.
   Observed 2026-10-21 13:07: the USB live log of x19s stopped mid-boot and en9 went inactive (no USB device)

@@ -544,6 +544,11 @@ pub unsafe extern "C" fn sm_render_set_fragment_sampler(e: *mut RenderCommandEnc
     !e.is_null() && ok((*e).set_fragment_sampler_state(opt(s), index))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn sm_render_set_vertex_sampler(e: *mut RenderCommandEncoder, s: *const SamplerState, index: u32) -> bool {
+    !e.is_null() && ok((*e).set_vertex_sampler_state(opt(s), index))
+}
+
 /// `setViewport:` (`MTLViewport`: origin, size, znear, zfar).
 #[no_mangle]
 pub unsafe extern "C" fn sm_render_set_viewport(

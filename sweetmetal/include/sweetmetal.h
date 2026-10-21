@@ -180,6 +180,7 @@ bool sm_render_set_fragment_buffer(sm_render_encoder *e, const sm_buffer *b, uin
 bool sm_render_set_fragment_bytes(sm_render_encoder *e, const void *bytes, size_t len, uint32_t index);
 bool sm_render_set_fragment_texture(sm_render_encoder *e, const sm_texture *t, uint32_t index);
 bool sm_render_set_fragment_sampler(sm_render_encoder *e, const sm_sampler *s, uint32_t index);
+bool sm_render_set_vertex_sampler(sm_render_encoder *e, const sm_sampler *s, uint32_t index);
 bool sm_render_set_viewport(sm_render_encoder *e, double x, double y, double w, double h, double znear, double zfar);
 bool sm_render_set_scissor(sm_render_encoder *e, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 bool sm_render_set_depth_stencil(sm_render_encoder *e, const sm_depth_stencil *s); /* NULL = nil */
