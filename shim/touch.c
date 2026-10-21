@@ -591,7 +591,11 @@ void touch_probe(void)
 	wr(SE + SE_CLK_SEL, 0);
 	wr(SE + SE_MCLK_CFG, (2u << 4) | 1u);
 	smmu_sid_check(0xb6);
-	int smmu_ok = smmu_route_sid_like(0xb6, 0x60);	/* like UFS */
+	int smmu_ok = smmu_route_sid_like(0xb6, 0x60);	/* gpi_dma1 TRE/event fetch, like UFS */
+	/* touch10: TREs fetched fine, reboot on the first data read: in GSI mode the
+	 * SE's own DMA moves the data, as the QUP wrapper (qupv3_1 iommus 0xa3) */
+	smmu_ok &= smmu_route_sid_like(0xa3, 0x60);
+	smmu_sid_check(0xa3);
 	smmu_sid_check(0xb6);
 	gpi_init_rc = smmu_ok ? gpi_init() : 0xdead;
 	gpi_ok = !gpi_init_rc;
