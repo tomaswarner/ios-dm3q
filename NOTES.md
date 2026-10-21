@@ -205,6 +205,15 @@
   act[7:6] (1 press 2 move 3 release), x = b1<<4|b3>>4, y = b2<<4|b3&15 (0..4095). Init: FA 20 00 00 24 81
   (system reset), wait status event (eid 1, stype 2 INFO, id 0 READY), READ_DEVICE_ID 0x22, FW 0x24,
   scan A0 00 01. The probe prints touches for 30 s.
+- **Touch SPI over GPI works (touch5-18, 2026-10-21):** recipe in `shim/touch.c`:
+  SE4 GPI mode (DMA_MODE_EN=1, GSI_EVENT_EN=0xf, SE_IRQ_EN=0); GPII 1 at `0x9f0000 + 0x20000 + 0x4000*n`
+  (ee_base = 0xa00000 - 0x10000); SMMU: SIDs 0xb6 (GPI) AND 0xa3 (QUP wrapper, SE DMA data) need an
+  SMR + S2CR copied from UFS SID 0x60 (S2CR 0 -> CB0 with M=0; Gunyah turns bypass into fault); RX TRE
+  DMA w/o IEOT, TX = CONFIG0(chain) + GO(duplex: chain+link) + DMA(IEOT). A TX DMA TRE without IEOT
+  never ends (partial word waits for EOT). wrap1_s4 is a DFS RCG (CMD_DFSR 0x18504 = 0x21; level 0 =
+  XO 19.2 MHz, SE dfs_if 0x301 preset). QUP1 BCM voted (cmd-db 0x50048, x=y=1) - not required.
+  touch18: 122 XFER_COMPL events, all rc 0, but the STM IC returned zeros (touch17/18 padded writes
+  to whole words - may have hit IC regs 0x25/0x26). touch19: exact lengths + SE loopback + FB HW id.
 - **Touch probe results (touch2-4, IMG_5757-5759):** clocks on (GCC vote 0x443C4380, SE4 CBCR 0x4000, RCG XO
   19.2 MHz), SE4 FW rev 0x102 (SPI), HW param0 0x20102864 (TX FIFO 16 x 32 bit), QUPv3 HW 0x30090000, pins OK
   (CS high, IRQ idle). Every transfer stalls: status 0x41 (cmd active), no M_IRQ even with M_IRQ_EN
