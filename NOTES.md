@@ -182,6 +182,10 @@
 - **Patch 0103:** SWEET.h GICR_PE_SIZE 0x20000 -> 0x40000 (DM3Q redistributor-stride). With 0x20000 the
   per-CPU redistributor walk (pe_fiq.c find_gicr_pe_base) only worked for CPU0. Needed for cpus>1
   (0065/0078 PSCI SMP; ADT CPU regs 0x000..0x700 match the SM8550 MPIDRs).
+- **Logview of x8 (IMG_5751/5752):** viewer works. SpringBoard[26] and backboardd[56] alive; sampler (0054: first
+  at 90 s, every 120 s) reached sample 4 (>= 7.5 min up), most threads at pc 0x20e955030 (waiting).
+  bluetoothd / fairplayd.H2 respawn in a loop via xpcproxy (as on sweet). Footer total=0x4795 seq=7, no
+  "SWEET LOG: write failed". Likely just slow: 1 CPU (an A510) vs sweet's 6 (README: ~4 min on the logo).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
