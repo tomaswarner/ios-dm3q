@@ -1,0 +1,26 @@
+diff -ruN a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-21 03:44:56
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-21 03:44:56
+@@ -244,7 +244,9 @@
+ 			for (uint32_t y = 0; y < fb->fHeight; y++) {
+ 				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
+ 				for (uint32_t x = 0; x < fb->fWidth; x++) {
+-					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
++					/* colour only: DM3Q's DPU blends by alpha, alpha 0 shows ABL's green
++					 * mixer background */
++					row[x] = step < 6 ? ((row[x] >> 1) & 0x007f7f7fu) | 0xff000000u : 0xff000000u;
+ 				}
+ 			}
+ 		}
+@@ -394,7 +396,10 @@
+ 			/* DM3Q: the GUI only repaints its own rectangle; blank the old
+ 			 * console text around it once */
+ 			for (uint32_t y = 0; y < fHeight; y++) {
+-				bzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fWidth * 4);
++				volatile uint32_t *row = (volatile uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++				for (uint32_t x = 0; x < fWidth; x++) {
++					row[x] = 0xff000000u;   /* opaque black (alpha 0 = green) */
++				}
+ 			}
+ 		}
+ 		int fill = 0;
