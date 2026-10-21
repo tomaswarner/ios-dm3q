@@ -401,6 +401,16 @@ void shim_main(uint64_t dtb)
 	con_clear(RED);
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 	con_skip();
+	/*
+	 * DM3Q: Samsung's ABL powers the UFS device down at exit; bring host, PHY,
+	 * link and device back (as U-Boot does) so xnu's sweet_ufs finds a live
+	 * host, the state sweet's ABL leaves behind.
+	 */
+	extern char _payload_start[], _payload_end[];
+	if ((uintptr_t)_payload_end != (uintptr_t)_payload_start) {
+		test_ufs_linux();
+		con_skip();
+	}
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
