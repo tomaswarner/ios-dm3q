@@ -69,6 +69,14 @@
   ice 0x4000, ahb 0x80000002 = HW_CTL idle-gated), GDSCs F822F800/F8222800 (PWR_ON). Not clocks.
   Probe `shim/out/dm3q-ufs3-boot.img`: AHIT/CFG1/CFG2/AH8 regs, DME_PEER_GET (is the device end alive?),
   dump of ABL's last UTRDs + UPIU/CDB (how ABL drove the host and its last command).
+- **ufs4 result (IMG_5727): ABL powers the UFS device down at exit.** DME_PEER_GET x3 -> rc 0x0A (DME_FAILURE):
+  the device end does not answer (local PA_PWRMode 0x11 is stale host state). ABL's slot 0 survived:
+  UTRD dw0 0x01000000, UPIU 01 00 D0 F9 = COMMAND to W-LUN 0xD0 (UFS Device), CDB 0x1B = START STOP UNIT;
+  the rest of its list is 0xAF (UEFI freed pool). AHIT 0, CFG1 0x1C00052C, CFG2 0x3F011300, AH8 0x1800.
+  sweet relied on ABL leaving UFS alive; DM3Q needs a Linux-style re-init. DT: reset = UFS_RESET pin
+  (TLMM 0xF0DE004 bit0, active low), vcc RPMh ldob17 2.5 V, vccq ldog1 1.2 V (parent smpg4), ref clk ldog3,
+  PHY ufsphy_mem@1d80000 "qcom,ufs-phy-qmp-v4-kalama". Probe `shim/out/dm3q-ufs5-boot.img` (test_ufs_wake):
+  RST_n pulse, HCE 0->1, DME_LINKSTARTUP, NOP OUT, fDeviceInit, TUR/CAP, GPT (no PHY init, no RPMh votes yet).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.

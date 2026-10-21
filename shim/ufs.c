@@ -205,6 +205,8 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 	}
 }
 
+static void read_gpt(void);
+
 void test_ufs(void)
 {
 	utrl = utrl_own;
@@ -259,7 +261,13 @@ void test_ufs(void)
 	if (!rc)
 		con_hex2("UFS LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
 
-	/* READ(10) LBA 0, 2 blocks: protective MBR and the GPT header. */
+	read_gpt();
+}
+
+/* READ(10) LBA 0, 2 blocks: protective MBR and GPT header, then the big partitions. */
+static void read_gpt(void)
+{
+	uint32_t ocs = 0, st = 0, rc;
 	static const uint8_t rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };
 	rc = scsi(0, rd10, sizeof(rd10), data, 2 * BLOCK, &ocs, &st);
 	con_hex2("UFS READ", "rc=", rc, "ocs/st=", ocs << 8 | st);
@@ -495,4 +503,143 @@ void test_ufs_dm3q(void)
 	}
 	/* smmu_probe(): done (dm3q ufs1: SID 0x60 -> CB0, SCTLR.M=0 bypass, no faults) */
 	(void)smmu_probe;
+}
+
+/* ---- DM3Q: wake the UFS device that ABL powered down at exit ----------- */
+
+#define TLMM_UFS_RESET_IO	0x0f0de004UL	/* pinctrl-sm8550 UFS_RESET io_reg, out bit 0, active low */
+#define IS_ULSS			(1u << 8)
+
+static void udelay(uint32_t us)
+{
+	uint64_t end = ticks() + (uint64_t)us * 192 / 10;
+	while (ticks() < end)
+		;
+}
+
+/* Query request: function 0x81 (write) / 0x01 (read), opcode, flag IDN. Returns flag value or 0x100+rc. */
+static uint32_t query_flag(uint8_t func, uint8_t opcode, uint8_t idn)
+{
+	zero(&utrl[0], sizeof(utrl[0]));
+	zero(ucdp, sizeof(*ucdp));
+	static uint8_t qtag;
+	ucdp->cmd[0] = 0x16;		/* QUERY REQUEST */
+	ucdp->cmd[3] = ++qtag;
+	ucdp->cmd[5] = func;
+	ucdp->cmd[12] = opcode;
+	ucdp->cmd[13] = idn;
+	uintptr_t cd = (uintptr_t)ucdp;
+	utrl[0].dw0 = (1u << 28) | (1u << 24);
+	utrl[0].dw2 = 0x0f;
+	utrl[0].ucdba = (uint32_t)cd;
+	utrl[0].ucdbau = (uint32_t)(cd >> 32);
+	utrl[0].resp = (512u / 4) << 16 | (512u / 4);
+	__asm__ volatile("dsb sy" ::: "memory");
+	ufs_wr(REG_UTRLDBR, 1);
+	uint64_t start = ticks();
+	while (ufs_rd(REG_UTRLDBR) & 1)
+		if (ticks() - start > 19200000) {
+			ufs_wr(REG_UTRLCLR, ~1u);
+			return 0x101;
+		}
+	if (utrl[0].dw2 & 0xff)
+		return 0x102;
+	if (ucdp->resp[0] != 0x36)	/* QUERY RESPONSE */
+		return 0x103;
+	if (ucdp->resp[6])		/* query response code */
+		return 0x180 | ucdp->resp[6];
+	return ucdp->resp[23];		/* flag value: LSB of the BE32 value at UPIU bytes 20-23 (Linux upiu_res.value) */
+}
+
+void test_ufs_wake(void)
+{
+	utrl = utrl_own;
+	ucdp = &ucd_own;
+	con_str("UFS", "dm3q wake (read-only data)");
+	uintptr_t abl = (uintptr_t)ufs_rd(REG_UTRLBA) | (uintptr_t)ufs_rd(REG_UTRLBAU) << 32;
+	if (abl) {
+		/* ABL's last command (dm3q ufs4): SSU to the UFS Device W-LUN 0xD0 */
+		volatile uint32_t *d = (volatile uint32_t *)abl;
+		uint32_t cd = d[4];
+		if (cd != 0xafafafafu && !d[5] && cd >= 0x80000000u && !(cd & 0x7f)) {
+			volatile uint8_t *c = (volatile uint8_t *)(uintptr_t)cd;
+			con_hex2("ABL LAST", "upiu=", c[0] << 24 | c[1] << 16 | c[2] << 8 | c[3],
+			    "cdb0-4=", c[16] << 24 | c[19] << 8 | c[20]);	/* opcode .. byte4 = power cond<<4 | start */
+		}
+	}
+	con_hex2("UFS", "hcs=", ufs_rd(REG_HCS), "rst io=", mmio_rd(TLMM_UFS_RESET_IO));
+
+	/* 1. device hardware reset (RST_n low 20 us), as ufs_qcom_device_reset */
+	stage_str("ufs reset pin");
+	mmio_wr(TLMM_UFS_RESET_IO, 0);
+	udelay(20);
+	mmio_wr(TLMM_UFS_RESET_IO, 1);
+	udelay(100);
+
+	/* 2. host controller reset: HCE 0 -> 1 */
+	stage_str("ufs hce");
+	ufs_wr(REG_HCE, 0);
+	uint64_t t0 = ticks();
+	while ((ufs_rd(REG_HCE) & 1) && ticks() - t0 < 1920000)
+		;
+	udelay(1000);
+	ufs_wr(REG_HCE, 1);
+	t0 = ticks();
+	while (!(ufs_rd(REG_HCE) & 1) && ticks() - t0 < 19200000)
+		;
+	con_hex2("HCE", "hce=", ufs_rd(REG_HCE), "hcs=", ufs_rd(REG_HCS));
+
+	/* 3. DME_LINKSTARTUP, up to 3 tries */
+	stage_str("ufs linkstartup");
+	uint32_t rc = 0xff;
+	for (int i = 0; i < 3 && rc; i++) {
+		rc = uic(0x16, 0, 0, 0);
+		con_hex2("LINKUP", "rc=", rc, "hcs=", ufs_rd(REG_HCS));
+	}
+	con_hex2("LINKUP", "is=", ufs_rd(REG_IS), "uecpa=", ufs_rd(REG_UECPA));
+	if (rc || !(ufs_rd(REG_HCS) & HCS_DP)) {
+		con_str("UFS", "link startup failed / no device");
+		return;
+	}
+	ufs_wr(REG_IS, ufs_rd(REG_IS));
+
+	/* 4. our transfer list, NOP OUT until the device answers */
+	stage_str("ufs nop");
+	ufs_wr(REG_UTRLBA, (uint32_t)(uintptr_t)utrl);
+	ufs_wr(REG_UTRLBAU, (uint32_t)((uintptr_t)utrl >> 32));
+	ufs_wr(REG_UTRLRSR, 1);
+	uint32_t ocs = 0, st = 0, nop = 1;
+	int tries = 0;
+	for (; tries < 10 && nop; tries++)
+		nop = scsi(0, 0, 0, 0, 0, &ocs, &st);
+	con_hex2("NOP", "rc=", nop << 8 | ocs, "tries=", tries);
+	if (nop)
+		return;
+
+	/* 5. fDeviceInit: set, then poll until the device clears it */
+	stage_str("ufs fdeviceinit");
+	uint32_t set = query_flag(0x81, 0x06, 0x01);	/* SET_FLAG fDeviceInit */
+	uint32_t val = 1;
+	for (tries = 0; tries < 100 && val == 1; tries++) {
+		udelay(10000);
+		val = query_flag(0x01, 0x05, 0x01);	/* READ_FLAG fDeviceInit */
+	}
+	con_hex2("FDEVINIT", "set=", set, "now=", val << 8 | tries);
+
+	/* 6. SCSI on LUN 0: TUR (unit attention first), capacity, GPT */
+	stage_str("ufs scsi");
+	static const uint8_t tur[6] = { 0x00 };
+	for (int i = 0; i < 4; i++) {
+		rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st);
+		if (!rc)
+			break;
+	}
+	con_hex2("TUR", "rc=", rc, "ocs/st=", ocs << 8 | st);
+	static const uint8_t cap10[10] = { 0x25 };
+	rc = scsi(0, cap10, sizeof(cap10), data, 8, &ocs, &st);
+	con_hex2("CAP", "rc=", rc, "ocs/st=", ocs << 8 | st);
+	if (!rc)
+		con_hex2("LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
+	stage_str("ufs gpt");
+	read_gpt();
 }

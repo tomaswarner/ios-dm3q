@@ -415,7 +415,7 @@ void shim_main(uint64_t dtb)
 	con_skip();
 	/* test_gic(): done (dm3q gic3: VTIMER 30/300 ms, SGI 10/10); keep the screen for UFS */
 	stage = "ufs";
-	test_ufs_dm3q();
+	test_ufs_wake();	/* dm3q ufs4: ABL powered the device down (SSU to W-LUN 0xD0) */
 	con_skip();
 	/* Keep the results on screen; no reset (the photo is the output). */
 	con_str("DONE", "hold; photograph this screen");
