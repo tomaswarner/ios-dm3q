@@ -284,6 +284,13 @@
   Fix applied: USERDATA re-flashed with the clean `apple/ios16-root-20H392.simg` + BOOT x12s (EPSS CPU
   boost, no DDR votes). Avoid Bold Text until CIContext's GL path fails cleanly. Shared cache:
   `apple/dsc/20H392__iPhone10,3_6/dyld_shared_cache_arm64` (ipsw extract --dyld).
+- **🎉 USB WORKS (boot x17s, kernel out-dm3q-010 = 0107 + 0108, sweetusb=3, 2026-10-21):** the Mac enumerates
+  "Sweet iOS (USB Ethernet)" 1209:0001 at high speed, AppleUserECM gives en9 (02:00:5e:77:ee:01); after
+  `sudo ifconfig en9 inet 192.168.7.1 netmask 255.255.255.0 up` ping 192.168.7.2 ~2 ms and the live kernel log
+  streams (tools/sweet-usbnet-mac.sh LOGFILE). Fixes: probe usb1 (ABL leaves GDSC/clocks/eUSB2 PHY on, DWC3 in
+  device mode halted); 0107 SM8550 offsets + SMMU stream 0x40 routed like UFS; 0108 the core is DWC_usb31
+  (GSNPSID 0x33313130) whose CSFTRST waits for the USB3 pipe clock (off) -> QSCRATCH GENERAL_CFG UTMI-as-pipe
+  (dwc3-qcom select_utmi_clk) + 50 ms. Shim DIAG=loggrep shows every 'SWEET USB' line of the log ring.
 - **🎉 2026-10-21 ~02:40 local: TOUCH WORKS IN iOS on the S23 Ultra** (boot x10s, kernel out-dm3q-006,
   sweettouch=2): user reports the touch works on the lock screen / home screen. Next: buttons (PMK8550 PON
   KPDPWR/RESIN + vol+ GPIO), RTC, UFS HS-G2+, USB live log, battery.
