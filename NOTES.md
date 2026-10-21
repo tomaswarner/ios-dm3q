@@ -125,6 +125,16 @@
   then IS UE and **HCS 0** (UCRDY gone) for all retries. Suspect GCC UFS symbol clock muxes left on TCXO by ABL's
   power-down: rx0 0x77064, rx1 0x770e0, tx0 0x77054 (gcc base 0x100000; 0 = PHY symbol clk, 2 = TCXO; Linux
   gcc-sm8550 parent maps 10/11/12). ufs9 prints them, sets 0 after PHY power-on, enables rx0/rx1/tx0 CBCRs.
+- **🎉 ufs9 (IMG_5737, 2026-10-20 ~23:25): UFS WORKS FROM SCRATCH ON DM3Q.** Sequence in `test_ufs_linux`
+  (shim/ufs.c + rpmh.c + ufsphy.c): RPMh votes -> RST_n pulse (0xF1DE004) -> HCE 0 -> GCC_UFS_PHY_BCR pulse ->
+  QMP PHY sm8550 tables (PCS ready) -> **enable GCC symbol clock branches rx0 0x7702c / rx1 0x770cc /
+  tx0 0x77028 (they were 0 = disabled; muxes 0x77064/0x770e0/0x77054 already 0 = PHY)** -> QUNIPRO_SEL ->
+  HCE 1 (TX FSM H8) -> core clk ctrl 300/12, LCC off -> DME_LINKSTARTUP rc 0 first try (HCS 0x0F; IS UE /
+  UECPA 0x10 line-reset indication is harmless) -> NOP OK -> SSU Active rc 4 (unit attention) -> fDeviceInit
+  cleared on first poll -> TUR OK -> READ CAPACITY: LUN0 last LBA 0x3B63FFF, 4 KiB blocks (~238 GiB) ->
+  GPT read: dsp, apnhlos, modem, boot 0x28400 (96 MiB), recovery, vendor_boot, vm-bootsys, super 0x50300,
+  prism, cache (ext4), omr, core_nhlos_a, **userdata LBA 0x3E0000, 0x3783F MiB (~222 GiB)**.
+  Next: run this bring-up in the shim before jumping to xnu so sweet_ufs.c finds a live host (as on sweet).
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
