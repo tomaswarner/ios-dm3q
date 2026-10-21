@@ -169,6 +169,12 @@
   present). backboardd loops on AppleM2ScalerCSCDriver: AppleCLCD presented the native 1440x3088 because the
   iPhone X size (1125x2436) was only used for panels <= that size. Patch **0101**: always present 1125x2436
   (unless sweetfb_native=1), centered via negative fOffX/fOffY (-157/-326) in present().
+- **🎉🎉 Boot x8 (IMG_5750, 2026-10-21 ~00:20 local): APPLE LOGO ON THE S23 ULTRA.** Kernel out-dm3q-004
+  (patch 0101: AppleCLCD presents 1125x2436 centered on the 1440x3088 panel). backboardd presents frames;
+  the Apple logo is drawn in the centered iPhone X area. Old console text remains in the margins (the GUI
+  only repaints its rectangle) and the heartbeat band is still drawn. TODO: blank the margins on the first
+  present, drop/disable the heartbeat, CPU upscale x1.28 to fill the panel, then touch (STM FTS over GENI
+  SPI @0xa90000, S2DOS05 rails) and keys (PMK8550 PON, PM8550 GPIO6) for interaction.
 - iOS root built on macOS: `sudo tools/mkiosroot-mac.sh OS SystemOS AppOS ../apple/ios16-root-20H392.img 16g`
   (iPhone X 16.7.16 20H392 IPSW from Apple, sha256 verified; fsck OK). User approved erasing Android
   userdata for iOS; flash only after UFS is shown to work.
