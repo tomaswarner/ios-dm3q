@@ -1,0 +1,140 @@
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+index dcf2dfa..1683ffa 100644
+--- a/bsd/dev/sweet_kgsl.c
++++ b/bsd/dev/sweet_kgsl.c
+@@ -113,6 +113,11 @@ struct kgsl_ios_map {
+ 	uint64_t addr, size;
+ };
+ 
++/* ours: read up to 32 GPU registers (dword offsets from 0x03d00000), for hang debugging over USB */
++struct kgsl_ios_regs {
++	uint32_t n, off[32], val[32];
++};
++
+ _Static_assert(sizeof(struct kgsl_devinfo) == 40, "kgsl_devinfo");
+ _Static_assert(sizeof(struct kgsl_device_getproperty) == 24, "getproperty");
+ _Static_assert(sizeof(struct kgsl_gpumem_alloc_id) == 48, "alloc_id");
+@@ -131,6 +136,7 @@ _Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
+ #define IOCTL_KGSL_GPUMEM_GET_INFO              _IOWR(KGSL_IOC, 0x36, struct kgsl_gpumem_get_info)
+ #define IOCTL_KGSL_GPU_COMMAND                  _IOWR(KGSL_IOC, 0x4a, struct kgsl_gpu_command)
+ #define IOCTL_KGSL_IOS_MAP                      _IOWR(KGSL_IOC, 0xe0, struct kgsl_ios_map)
++#define IOCTL_KGSL_IOS_REGS                     _IOWR(KGSL_IOC, 0xe1, struct kgsl_ios_regs)
+ 
+ #define KGSL_PROP_DEVICE_INFO           0x01
+ #define KGSL_PROP_GPU_RESET_STAT        0x09
+@@ -165,8 +171,15 @@ _Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
+ #define MAX_IB          64
+ #define PKT7(op, cnt)   (0x70000000u | ((uint32_t)(cnt) & 0x3fffu) | (parity((uint32_t)(cnt)) << 15) | \
+ 	                 (((uint32_t)(op) & 0x7fu) << 16) | (parity((uint32_t)(op)) << 23))
+-#define CP_INDIRECT_BUFFER      0x3f
++#define CP_NOP                  0x10
++#define CP_INDIRECT_BUFFER      0x3f            /* CP_INDIRECT_BUFFER_PFE */
+ #define CP_EVENT_WRITE          0x46
++#define CP_SET_MARKER           0x65
++#define CP_THREAD_CONTROL       0x17
++#define THREAD_BR               1u              /* CP_SET_THREAD_BR */
++#define THREAD_BOTH             3u              /* CP_SET_THREAD_BOTH */
++#define EV_CCU_INVALIDATE_DEPTH 24u
++#define EV_CCU_INVALIDATE_COLOR 25u
+ #define EV_CACHE_CLEAN_TS       0x08000031u     /* CACHE_CLEAN | timestamp (0111 pings) */
+ #define CP_HW_FAULT             0x02084u
+ 
+@@ -449,14 +462,29 @@ ctx_destroy(int owner, uint32_t id)
+ 	return c ? 0 : EINVAL;
+ }
+ 
++/*
++ * Ring packets per submit, as KGSL gen7_ringbuffer_submitcmd + gen7_ringbuffer_addcmds wrap a user
++ * submission (minus preemption, profiling, secure mode, context switch): IFPC off marker, the IBs
++ * between IB1LIST markers, CCU invalidates, the context timestamp, IFPC on marker.
++ */
+ static int
+ gpu_command(int owner, struct kgsl_gpu_command *cmd)
+ {
+-	uint32_t pkt[4 * MAX_IB + 8], n = 0;
++	uint32_t pkt[4 * MAX_IB + 48], n = 0;
+ 	struct kgsl_command_object obj;
+ 	if (cmd->numcmds > MAX_IB || (cmd->numcmds && cmd->cmdsize < sizeof(obj))) {
+ 		return EINVAL;
+ 	}
++	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
++	pkt[n++] = THREAD_BOTH;
++	pkt[n++] = PKT7(CP_SET_MARKER, 1);
++	pkt[n++] = 0x101;                               /* IFPC disable */
++	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
++	pkt[n++] = THREAD_BR;
++	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
++	pkt[n++] = THREAD_BOTH;
++	pkt[n++] = PKT7(CP_SET_MARKER, 1);
++	pkt[n++] = 0x00d;                               /* IB1LIST start */
+ 	for (uint32_t i = 0; i < cmd->numcmds; i++) {
+ 		int err = copyin((user_addr_t)(cmd->cmdlist + (uint64_t)i * cmd->cmdsize), &obj, sizeof(obj));
+ 		if (err) {
+@@ -468,8 +496,16 @@ gpu_command(int owner, struct kgsl_gpu_command *cmd)
+ 		pkt[n++] = PKT7(CP_INDIRECT_BUFFER, 3);
+ 		pkt[n++] = (uint32_t)obj.gpuaddr;
+ 		pkt[n++] = (uint32_t)(obj.gpuaddr >> 32);
+-		pkt[n++] = (uint32_t)(obj.size / 4);
+-	}
++		pkt[n++] = (uint32_t)(obj.size / 4) & 0xfffffu;
++	}
++	pkt[n++] = PKT7(CP_SET_MARKER, 1);
++	pkt[n++] = 0x00e;                               /* IB1LIST end */
++	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
++	pkt[n++] = THREAD_BR;
++	pkt[n++] = PKT7(CP_EVENT_WRITE, 1);
++	pkt[n++] = EV_CCU_INVALIDATE_DEPTH;
++	pkt[n++] = PKT7(CP_EVENT_WRITE, 1);
++	pkt[n++] = EV_CCU_INVALIDATE_COLOR;
+ 	lck_mtx_lock(&kgsl_mtx);
+ 	struct kctx *c = ctx_get(owner, cmd->context_id);
+ 	if (!c) {
+@@ -483,6 +519,12 @@ gpu_command(int owner, struct kgsl_gpu_command *cmd)
+ 	pkt[n++] = (uint32_t)ms;
+ 	pkt[n++] = (uint32_t)(ms >> 32);
+ 	pkt[n++] = ts;
++	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
++	pkt[n++] = THREAD_BOTH;
++	pkt[n++] = PKT7(CP_SET_MARKER, 1);
++	pkt[n++] = 0x100;                               /* IFPC enable */
++	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
++	pkt[n++] = THREAD_BR;
+ 	int err = sweet_gpu_ring_write(pkt, n);         /* under kgsl_mtx: ring order == timestamp order */
+ 	lck_mtx_unlock(&kgsl_mtx);
+ 	if (err) {
+@@ -512,6 +554,15 @@ wait_ts(int owner, struct kgsl_device_waittimestamp_ctxtid *w)
+ 			return EPROTO;
+ 		}
+ 		if (ms >= w->timeout) {
++			if (ms >= 1000) {
++				printf("SWEET KGSL: ctx %u ts %u not retired after %u ms (at %u): rptr %x wptr %x ib1 %x_%08x rem %x "
++				    "ib2 %x_%08x rem %x rbbm %x status1 %x int %x protect %x bvfault %x\n", w->context_id,
++				    w->timestamp, ms, retired(ctx), sweet_gpu_reg(0x806 * 4), sweet_gpu_reg(0x807 * 4),
++				    sweet_gpu_reg(0x929 * 4), sweet_gpu_reg(0x928 * 4), sweet_gpu_reg(0x92a * 4),
++				    sweet_gpu_reg(0x92c * 4), sweet_gpu_reg(0x92b * 4), sweet_gpu_reg(0x92d * 4),
++				    sweet_gpu_reg(0x210 * 4), sweet_gpu_reg(0x825 * 4), sweet_gpu_reg(0x823 * 4),
++				    sweet_gpu_reg(0x824 * 4), sweet_gpu_reg(0xa64 * 4));
++			}
+ 			return ETIMEDOUT;
+ 		}
+ 		uint64_t deadline;
+@@ -663,6 +714,19 @@ kgsl_ioctl(dev_t dev, u_long cmd, caddr_t data, __unused int fflag, __unused pro
+ 		return wait_ts(owner, (struct kgsl_device_waittimestamp_ctxtid *)data);
+ 	case IOCTL_KGSL_IOS_MAP:
+ 		return bo_map(owner, (struct kgsl_ios_map *)data);
++	case IOCTL_KGSL_IOS_REGS: {
++		struct kgsl_ios_regs *r = (struct kgsl_ios_regs *)data;
++		if (r->n > 32) {
++			return EINVAL;
++		}
++		for (uint32_t i = 0; i < r->n; i++) {
++			if (r->off[i] >= 0x10000u) {     /* the 0x40000-byte GPU register block */
++				return EINVAL;
++			}
++			r->val[i] = sweet_gpu_reg(r->off[i] * 4);
++		}
++		return 0;
++	}
+ 	default:
+ 		return ENOTTY;  /* GPUOBJ_*, BIND_RANGES, AUX_COMMAND, TIMESTAMP_EVENT: Turnip falls back */
+ 	}
