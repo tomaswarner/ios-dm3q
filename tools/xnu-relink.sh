@@ -34,13 +34,18 @@ for n in "$@"; do
 	*__*.cpp.o) b=${b##*__}; b=${b%.cpp.o}.cpo ;;
 	*__*.o) b=${b##*__}; b=${b%.*.o}.o ;;
 	esac
-	[ -f "$W/o/$b" ] || { echo "no archive member $b to replace" >&2; exit 1; }
+	if [ -f "$W/o/$b" ]; then
+		echo "replaced $b"
+	else
+		echo "added $b (new source)"
+		echo "$b" >> "$W/added"
+	fi
 	cp "$n" "$W/o/$b"
-	echo "replaced $b"
 done
 # archive order, the three objects the Makefile names after the filelist kept last
 xcrun ar t "$LINK/kernel.development.sweet.a" | grep -vxE 'version.o|lastkerneldataconst.o|lastkernelconstructor.o|__.SYMDEF.*' |
 	sed "s|^|$W/o/|" > "$W/link.filelist"
+[ -f "$W/added" ] && sed "s|^|$W/o/|" "$W/added" >> "$W/link.filelist"
 cp "$RL/libfirehose_kernel.a" "$W/lib/"
 CCKEXT=$(find "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang" -name libclang_rt.cc_kext.a | head -1)
 ln -s "$CCKEXT" "$W/lib/libcc_kext.a"

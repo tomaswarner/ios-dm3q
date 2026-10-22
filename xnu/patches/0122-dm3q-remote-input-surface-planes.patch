@@ -1,0 +1,159 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index f8d2391..5b15fa6 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -115,6 +115,7 @@ bsd/dev/sweet_usb.c			standard
+ bsd/dev/sweet_thermal.c			standard
+ bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_kgsl.c			standard
++bsd/dev/sweet_input.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sweet_input.c b/bsd/dev/sweet_input.c
+new file mode 100644
+index 0000000..e1da9e9
+--- /dev/null
++++ b/bsd/dev/sweet_input.c
+@@ -0,0 +1,89 @@
++/*
++ * DM3Q remote control over USB: synthetic touches and button presses through the same entry points
++ * the STM touch and SPMI key drivers use (SweetHID.cpp), so iOS sees them as the real ones.
++ * sysctl kern.sweet_input (root only, write): "t FINGER DOWN X Y" (logical 1125x2436 points as the
++ * touch driver reports them) or "k KEY DOWN" (0 power, 1 volume up, 2 volume down, 3 home).
++ * Driven by tools/sweettest/sm_input.c (tap, swipe, key) through sweetrun.
++ *
++ * Also, read only, for the reboot-to-Download work (port/docs/dm3q/REBOOT-DOWNLOAD.md): at boot,
++ * logs the PMK8550 SDAM byte at SPMI SID 0 0x7148 (Samsung's PON restart reason) as our SPMI
++ * reader sees it ("SWEET INPUT: pon restart reason").
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/sysctl.h>
++#include <libkern/libkern.h>
++
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern void sweet_hid_key(int key, int down);
++extern int sweet_spmi_init(void);
++extern int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++void sweet_input_report(void);
++
++static int
++parse_ints(const char *s, int *v, int max)
++{
++	int n = 0;
++	while (*s && n < max) {
++		while (*s == ' ') {
++			s++;
++		}
++		if (!*s) {
++			break;
++		}
++		int neg = *s == '-', x = 0;
++		if (neg) {
++			s++;
++		}
++		if (*s < '0' || *s > '9') {
++			return -1;
++		}
++		while (*s >= '0' && *s <= '9') {
++			x = x * 10 + (*s++ - '0');
++		}
++		v[n++] = neg ? -x : x;
++	}
++	return n;
++}
++
++static int
++sweet_input_sysctl SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	char buf[64];
++	int v[4];
++	size_t len;
++
++	if (req->newptr == USER_ADDR_NULL) {
++		return 0;
++	}
++	len = req->newlen < sizeof(buf) - 1 ? req->newlen : sizeof(buf) - 1;
++	int err = SYSCTL_IN(req, buf, len);
++	if (err) {
++		return err;
++	}
++	buf[len] = 0;
++	if (buf[0] == 't' && parse_ints(buf + 1, v, 4) == 4 && v[0] >= 0 && v[0] < 10) {
++		sweet_hid_touch(v[0], v[1], v[2], v[3]);
++		return 0;
++	}
++	if (buf[0] == 'k' && parse_ints(buf + 1, v, 2) == 2 && v[0] >= 0 && v[0] <= 3) {
++		sweet_hid_key(v[0], v[1]);
++		return 0;
++	}
++	return EINVAL;
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_input, CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_LOCKED, NULL, 0,
++    sweet_input_sysctl, "A", "DM3Q synthetic touch / key input");
++
++void
++sweet_input_report(void)
++{
++	uint8_t rr = 0;
++	int r = sweet_spmi_init() ? -1 : sweet_spmi_read(0, 0x7148, &rr);
++	printf("SWEET INPUT: kern.sweet_input ready; pon restart reason (SDAM 0x7148) %s 0x%02x\n",
++	    r ? "unreadable" : "=", rr);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 1981490..1cb479d 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -90,7 +90,7 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 	unsigned peripheral = addr >> 8;
+ 	if (!sp_ready || !out || sid != 0 || addr > 0xffffu ||
+ 	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
+-	    peripheral != 0x13 && peripheral != 0x48)) {
++	    peripheral != 0x13 && peripheral != 0x48 && peripheral != 0x71)) {   /* 0x71: SDAM, PON restart reason (read) */
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 3f02316..33d8313 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -55,6 +55,7 @@ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ extern void sweet_thermal_start(void);	/* DM3Q thermal guard (sweet_thermal.c) */
+ extern void sweet_gpu_start(void);	/* DM3Q Adreno 740 takeover from the shim (sweet_gpu.c) */
++extern void sweet_input_report(void);	/* DM3Q remote input sysctl (sweet_input.c) */
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -664,6 +665,7 @@ sweet_ufs_init(void)
+ 	sweet_usb_probe();
+ 	sweet_thermal_start();
+ 	sweet_gpu_start();
++	sweet_input_report();
+ 	return 0;
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 7f90c56..9cb97d5 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -711,6 +711,14 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 		    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,
+ 		    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret);
+ 	}
++	/* planes of multi-plane surfaces (formats such as '_RB4' the Metal layer does not know yet) */
++	for (uint32_t i = 0; ret == kIOReturnSuccess && s->planeCount > 1 && i < s->planeCount &&
++	    sweet_surface_creates_logged < 256; i++) {
++		const struct sweet_surface_plane *pl = &s->planes[i];
++		IOLog("SWEET SURF:   id %u fmt 0x%x plane %u: %ux%u bpe %u ew %u eh %u bpr %u offset %u size %u\n", s->id,
++		    s->pixelFormat, i, pl->width, pl->height, pl->bytesPerElement, pl->elementWidth, pl->elementHeight,
++		    pl->bytesPerRow, pl->offset, pl->size);
++	}
+ 	props->release();
+ 	if (ret != kIOReturnSuccess) {
+ 		s->release();
