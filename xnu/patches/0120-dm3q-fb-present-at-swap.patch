@@ -1,0 +1,96 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 8151626..36fa0de 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -115,6 +115,9 @@ public:
+ 	uint16_t     *fXMap, *fYMap;    /* DM3Q fill: logical x / y of each panel column / row (no divides per pixel) */
+ 	uint64_t      fPresentAbs, fPresentMaxAbs;      /* present() time, for the log every 128 frames */
+ 	uint32_t      fPresents;
++	bool          fSyncPresent;     /* copy at SwapEnd (default; boot-arg sweetfb_sync=0: at the vsync timer) */
++	IOLock       *fPresentLock;     /* one present() at a time (SwapEnd threads, vsync) */
++	void          timedPresent(const uint8_t *rec);
+ 	void          presentScaled(SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
+ 	    int32_t dx, int32_t dy, int32_t w, int32_t h);
+ 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+@@ -189,6 +192,10 @@ AppleCLCD::start(IOService *provider)
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+ 	fLock = IOLockAlloc();
++	fPresentLock = IOLockAlloc();
++	int sync = 1;
++	PE_parse_boot_argn("sweetfb_sync", &sync, sizeof(sync));
++	fSyncPresent = sync != 0;
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
+@@ -267,26 +274,35 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
+-		uint64_t t0 = mach_absolute_time();
+-		fb->present(rec);
+-		uint64_t dt = mach_absolute_time() - t0;
++		fb->timedPresent(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+-		fb->fPresentAbs += dt;
+-		if (dt > fb->fPresentMaxAbs) {
+-			fb->fPresentMaxAbs = dt;
+-		}
+-		if (++fb->fPresents % 128 == 0) {
+-			uint64_t avg, max;
+-			absolutetime_to_nanoseconds(fb->fPresentAbs / 128, &avg);
+-			absolutetime_to_nanoseconds(fb->fPresentMaxAbs, &max);
+-			IOLog("SWEET FB: present %u frames: mean %llu us, max %llu us (panel copy, CPU)\n", fb->fPresents,
+-			    avg / 1000, max / 1000);
+-			fb->fPresentAbs = fb->fPresentMaxAbs = 0;
+-		}
+ 	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+ 
++/* present() under fPresentLock, timed (log every 128 frames) */
++void
++AppleCLCD::timedPresent(const uint8_t *rec)
++{
++	IOLockLock(fPresentLock);
++	uint64_t t0 = mach_absolute_time();
++	present(rec);
++	uint64_t dt = mach_absolute_time() - t0;
++	fPresentAbs += dt;
++	if (dt > fPresentMaxAbs) {
++		fPresentMaxAbs = dt;
++	}
++	if (++fPresents % 128 == 0) {
++		uint64_t avg, max;
++		absolutetime_to_nanoseconds(fPresentAbs / 128, &avg);
++		absolutetime_to_nanoseconds(fPresentMaxAbs, &max);
++		IOLog("SWEET FB: present %u frames: mean %llu us, max %llu us (panel copy, CPU, %s)\n", fPresents,
++		    avg / 1000, max / 1000, fSyncPresent ? "at SwapEnd" : "at vsync");
++		fPresentAbs = fPresentMaxAbs = 0;
++	}
++	IOLockUnlock(fPresentLock);
++}
++
+ void
+ AppleCLCD::addClient(IOMobileFramebufferUserClient *client)
+ {
+@@ -327,6 +343,19 @@ static uint64_t sweet_fb_swap_count;
+ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
++	/*
++	 * Copy now, before SwapEnd returns: nothing tells CoreAnimation when the panel copy of a
++	 * surface is done, so it reuses the surface for a later frame at once; copied later (at the
++	 * vsync timer, up to 1/sweetfb_hz s after) the copy reads a frame being drawn over (GPU:
++	 * torn, mixed frames).
++	 */
++	if (fSyncPresent && !fPowerOff) {
++		timedPresent(rec);
++		if ((++sweet_fb_swap_count % 1000) == 0) {
++			IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
++		}
++		return;
++	}
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
