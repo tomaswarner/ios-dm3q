@@ -1,0 +1,184 @@
+diff --git a/bsd/dev/sweet_input.c b/bsd/dev/sweet_input.c
+index 4fa01cd..34273e4 100644
+--- a/bsd/dev/sweet_input.c
++++ b/bsd/dev/sweet_input.c
+@@ -144,6 +144,113 @@ spmi_v7_probe(void)
+ 	printf("SWEET SPMI7: SDAM read timeout\n");
+ }
+ 
++/*
++ * Reboot into Samsung's Download Mode (Odin), as Android's `reboot download` does on this phone
++ * (port/docs/dm3q/REBOOT-DOWNLOAD.md, from the stock sec_qc_rbcmd / sec_qc_reboot_reason / qcom-dload
++ * modules): clear Qualcomm's dump-mode cookie (TCSR 0x1fd9000) through TZ's io-write SCM call, write the
++ * PON restart reason DOWNLOAD (0x15 in bits 7:1) into PMK8550 SDAM 0x7148 through SPMI v7 write channel
++ * chnls + 0x1000 * apid (owner EE0 checked), read it back, then PSCI SYSTEM_RESET. No reset when the
++ * read-back differs. sysctl kern.sweet_reboot (root, write): "download" or "normal".
++ */
++static int
++spmi_v7_cmd(vm_offset_t ch, uint32_t cmd, uint32_t wdata, uint8_t *rdata)
++{
++	if (rdata == NULL) {
++		*(volatile uint32_t *)(ch + 0x10) = wdata;      /* WDATA0 first */
++	}
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)ch = cmd;
++	__asm__ volatile ("dsb osh" ::: "memory");
++	for (int i = 0; i < 1000; i++) {
++		uint32_t st = rd32(ch + 8);
++		if (st & 1u) {
++			if (st & 0xeu) {
++				return -(int)st;
++			}
++			if (rdata) {
++				*rdata = (uint8_t)(rd32(ch + 0x18) & 0xffu);
++			}
++			return 0;
++		}
++		delay(1);
++	}
++	return -1;
++}
++
++static int
++reboot_download(void)
++{
++	vm_offset_t core = ml_io_map(0xc400000, 0x4000), cnfg = ml_io_map(0xc42d000, 0x4000);
++	vm_offset_t obs = ml_io_map(0xc440000, 0x8000);
++	if (!core || !cnfg || !obs || rd32(core) < 0x70000000u || rd32(core) >= 0x80000000u) {
++		printf("SWEET REBOOT: SPMI v7 arbiter not found\n");
++		return ENXIO;
++	}
++	int apid = -1;
++	for (unsigned n = 0; n < 1024 && apid < 0; n++) {
++		if (((rd32(core + 0x2000 + 4 * n) >> 8) & 0xfffu) == 0x071u && (rd32(cnfg + 4 * n) & 7u) == 0) {
++			apid = (int)n;
++		}
++	}
++	if (apid < 0) {
++		printf("SWEET REBOOT: SDAM channel (PPID 0x071, EE0) not found\n");
++		return ENXIO;
++	}
++	vm_offset_t rd = obs + 0x20u * (unsigned)apid, wr = ml_io_map(0xc500000 + 0x1000u * (unsigned)apid, 0x1000);
++	uint8_t old = 0, now = 0;
++	if (!wr || spmi_v7_cmd(rd, (1u << 27) | (0x48u << 4), 0, &old)) {
++		printf("SWEET REBOOT: SDAM read failed\n");
++		return EIO;
++	}
++	uint8_t want = (uint8_t)((old & 1u) | (0x15u << 1));
++	int ok = 0;
++	for (int tries = 0; tries < 4 && !ok; tries++) {
++		int w = spmi_v7_cmd(wr, (0u << 27) | (0x48u << 4), want, NULL);
++		ok = !w && !spmi_v7_cmd(rd, (1u << 27) | (0x48u << 4), 0, &now) && now == want;
++	}
++	printf("SWEET REBOOT: SDAM 0x7148 0x%02x -> 0x%02x (read back 0x%02x) %s\n", old, want, now, ok ? "ok" : "FAILED");
++	if (!ok) {
++		return EIO;
++	}
++	/* qcom dload cookie off (TZ io-write, fast SMC64 svc 5 cmd 2, 2 args), then PSCI SYSTEM_RESET */
++	register uint64_t x0 __asm__("x0") = 0xC2000502ull, x1 __asm__("x1") = 2, x2 __asm__("x2") = 0x1fd9000,
++	    x3 __asm__("x3") = 0;
++	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : : "x4", "x5", "x6", "x7", "memory");
++	printf("SWEET REBOOT: dload cookie clear -> %lld; resetting into Download Mode\n", (long long)x0);
++	delay(200000);
++	register uint64_t r0 __asm__("x0") = 0x84000009ull;
++	__asm__ volatile ("smc #0" : "+r"(r0) : : "x1", "x2", "x3", "memory");
++	return EIO;     /* not reached */
++}
++
++static int
++sweet_reboot_sysctl SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	char buf[16];
++	size_t len;
++	if (req->newptr == USER_ADDR_NULL) {
++		return 0;
++	}
++	len = req->newlen < sizeof(buf) - 1 ? req->newlen : sizeof(buf) - 1;
++	int err = SYSCTL_IN(req, buf, len);
++	if (err) {
++		return err;
++	}
++	buf[len] = 0;
++	if (!strcmp(buf, "download")) {
++		return reboot_download();
++	}
++	if (!strcmp(buf, "normal")) {
++		register uint64_t r0 __asm__("x0") = 0x84000009ull;
++		__asm__ volatile ("smc #0" : "+r"(r0) : : "x1", "x2", "x3", "memory");
++	}
++	return EINVAL;
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_reboot, CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_LOCKED, NULL, 0,
++    sweet_reboot_sysctl, "A", "DM3Q reboot: download | normal");
++
+ void
+ sweet_input_report(void)
+ {
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index 61ad037..0fc45ed 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -266,6 +266,8 @@ sweet_usb_probe(void)
+ 
+ #define UD_TXQ          32
+ 
++static volatile int sweet_usb_seen_reset;      /* the host has reset the bus at least once */
++
+ static struct {
+ 	vm_offset_t dwc;
+ 	vm_offset_t dma;
+@@ -760,6 +762,7 @@ ud_event(uint32_t ev)
+ 		if (type == 1) {        /* USB reset */
+ 			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
+ 			printf("SWEET USB: bus reset\n");
++			sweet_usb_seen_reset = 1;
+ 		} else if (type == 2) { /* connect done */
+ 			uint32_t speed = dwc_rd(DSTS) & 7;
+ 			/* ep0 max packet: 64 at high/full speed (modify action) */
+@@ -823,6 +826,34 @@ ud_event(uint32_t ev)
+ 	}
+ }
+ 
++/*
++ * DM3Q: the host does not see the phone after boot until the cable is replugged (the bootloader's
++ * session ends without a disconnect the host notices). Until the host resets the bus, every 4 s:
++ * a soft disconnect (RUN_STOP 0, the D+ pull-up off) for 1 s and connect again, what a replug does.
++ */
++extern kern_return_t thread_terminate(thread_t);
++static int ud_reconnect_chan;
++
++static void
++ud_reconnect_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	for (int tries = 0; tries < 6 && !sweet_usb_seen_reset; tries++) {
++		uint64_t deadline;
++		clock_interval_to_deadline(4000, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&ud_reconnect_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++		if (sweet_usb_seen_reset) {
++			break;
++		}
++		printf("SWEET USB: no bus reset yet: soft disconnect/connect (try %d)\n", tries + 1);
++		dwc_wr(DCTL, dwc_rd(DCTL) & ~DCTL_RUN_STOP);
++		delay(1000000);
++		dwc_wr(DCTL, dwc_rd(DCTL) | DCTL_RUN_STOP);
++	}
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
+ static void
+ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+@@ -987,6 +1018,9 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	if (kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	if (kernel_thread_start(ud_reconnect_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
+ 	int livelog = 1;
+ 	PE_parse_boot_argn("sweetusblog", &livelog, sizeof(livelog));
+ 	if (livelog && ud.ifp != NULL && kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
