@@ -1,0 +1,111 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index 700e54b..882c99b 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -59,7 +59,9 @@ use std::sync::{Arc, Mutex};
+ use std::time::{Duration, Instant};
+ 
+ /// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
+-pub(super) const BLOCK_BYTES: u64 = 64 << 20;
++/// DM3Q port: 16 MiB (was 64): every process on the Adreno shares one 1 GiB GPU pool, and two kept
++/// empty 64 MiB blocks per pool per process filled it (out of device memory under CoreAnimation).
++pub(super) const BLOCK_BYTES: u64 = 16 << 20;
+ 
+ /// The most empty pooled blocks a pool keeps for its next placements ([`Pool::release`]), at
+ /// most 128 MiB of empty memory a pool. In a pool the encodings place in, one of them is mostly
+diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-runtime/src/texture.rs
+index 9ad31de..1135c0b 100644
+--- a/crates/metal2vulkan-runtime/src/texture.rs
++++ b/crates/metal2vulkan-runtime/src/texture.rs
+@@ -2040,7 +2040,8 @@ impl Device {
+         // usage. A CPU write to the bytes then could be undone, where Metal keeps every one, and
+         // Metal's contract leaves no moment the CPU may not write them. The shadow's copies
+         // address its texels alone, through the buffer.
+-        let host = texels.buffer.caller_memory() == Some(CallerMemory::HostPages);
++        let host = texels.buffer.caller_memory() == Some(CallerMemory::HostPages)
++            && !alias_host_pages();
+         // The plans a linear image aliasing the bytes is tried with, the first the device makes:
+         // with the feedback loop usage a draw takes that reads the texture its own pass renders
+         // through a snapshot (`feedback_candidate`, `texture/attached_reads.rs`), which costs a
+@@ -2330,6 +2331,9 @@ impl Device {
+     ) -> Result<Aliased, Error> {
+         match texels.buffer.caller_memory() {
+             None => {}
++            // lavapipe (M2V_ALIAS_HOST_PAGES): an image bound to the imported host memory as to
++            // the runtime's own; its layout moves touch no memory there.
++            Some(CallerMemory::HostPages) if alias_host_pages() => {}
+             Some(CallerMemory::HostPages) => {
+                 return Err(internal("an aliasing image over the caller's host pages"));
+             }
+@@ -3610,6 +3614,15 @@ impl Drop for Staging<'_> {
+ }
+ 
+ /// The host pages an image is bound to, as its first move notes them (`texture/first_move.rs`).
++/// Whether textures may alias the caller's host pages (environment `M2V_ALIAS_HOST_PAGES` set):
++/// for a driver whose layout transitions never touch an image's memory (lavapipe), where the
++/// window server renders straight into its IOSurfaces instead of through a shadow it copies the
++/// whole surface into for every pass. Off by default (the refusal above is Metal's contract).
++fn alias_host_pages() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("M2V_ALIAS_HOST_PAGES").is_some())
++}
++
+ fn pages_hold(pages: &Arc<HostPages>) -> Option<Weak<dyn Any + Send + Sync>> {
+     let pages: Weak<dyn Any + Send + Sync> = Arc::downgrade(pages) as _;
+     Some(pages)
+diff --git a/crates/metal2vulkan-runtime/src/ycbcr.rs b/crates/metal2vulkan-runtime/src/ycbcr.rs
+index bdb3a2b..24f8ecf 100644
+--- a/crates/metal2vulkan-runtime/src/ycbcr.rs
++++ b/crates/metal2vulkan-runtime/src/ycbcr.rs
+@@ -145,7 +145,10 @@ use std::ops::Range;
+ /// `pf20`, `pf22` and `pf44`, the same packed three to a 32-bit word. A format reads a surface
+ /// whose chroma plane holds its own: a 4:2:0 format a 4:2:2 or 4:4:4 surface's, a 4:2:2 format a
+ /// 4:4:4 one's, each at the surface's rows.
+-const SURFACES: [(&[u8; 4], u32, bool, YCbCrRange, ChromaSubsampling); 18] = {
++/// DM3Q port: `_RB4` too, the surfaces iOS 16's chronod renders widget snapshots into and CoreAnimation
++/// samples as `RGB8_444_2P`: 8-bit 4:4:4, plane 0 one byte a texel, plane 1 two (SweetSurface plane
++/// logs: 987x1605 planes bpr 1024 / 1984, bpe 1 / 2); the code formats read the codes as they are.
++const SURFACES: [(&[u8; 4], u32, bool, YCbCrRange, ChromaSubsampling); 19] = {
+     use ChromaSubsampling::{Chroma420 as C420, Chroma422 as C422, Chroma444 as C444};
+     [
+         (b"420v", 8, false, YCbCrRange::Video, C420),
+@@ -166,6 +169,7 @@ const SURFACES: [(&[u8; 4], u32, bool, YCbCrRange, ChromaSubsampling); 18] = {
+         (b"pf22", 10, true, YCbCrRange::Full, C422),
+         (b"p444", 10, true, YCbCrRange::Video, C444),
+         (b"pf44", 10, true, YCbCrRange::Full, C444),
++        (b"_RB4", 8, false, YCbCrRange::Full, C444),
+     ]
+ };
+ /// What the planes' offsets and rows are multiples of: Metal's GPU reads a plane from its offset
+diff --git a/crates/metal2vulkan/src/lower/fragment/mod.rs b/crates/metal2vulkan/src/lower/fragment/mod.rs
+index 67bdbfb..ab0c2d1 100644
+--- a/crates/metal2vulkan/src/lower/fragment/mod.rs
++++ b/crates/metal2vulkan/src/lower/fragment/mod.rs
+@@ -342,12 +342,21 @@ pub fn finish(cx: &mut SelectCx<'_>, m: &mut Meter) -> Result<(), Error> {
+     // raster order group.
+     let shadow = cx.families.fragment.stencil.is_some();
+     let storage = !cx.families.fragment.fetch.is_empty() || shadow;
+-    let interlock =
+-        if rog::declared(cx.entry) || cx.families.fragment.imageblock.is_some() || storage {
+-            Some(rog::mode(cx)?)
+-        } else {
+-            None
+-        };
++    // A function that only names a raster order group, with no imageblock and no storage form,
++    // on a device without the pixel interlock but with rasterization-order color attachment
++    // access (Turnip): its framebuffer reads are input attachments, which that access already
++    // orders between overlapping fragments, so it runs without a critical section. Device memory
++    // it writes in the group is then unordered (local patch for the DM3Q port: CoreAnimation's
++    // inplace_copy pipelines).
++    let f = cx.profile.fields().fragment;
++    let rog_by_inputs = !f.pixel_interlock && !f.sample_interlock && f.rasterization_order_color_access;
++    let interlock = if cx.families.fragment.imageblock.is_some() || storage {
++        Some(rog::mode(cx)?)
++    } else if rog::declared(cx.entry) && !rog_by_inputs {
++        Some(rog::mode(cx)?)
++    } else {
++        None
++    };
+     let snapshot = snapshot::finish(cx, interlock.is_some(), looped)?;
+     let sites: Vec<InstId> = cx.families.fragment.discards.keys().copied().collect();
+     let discard::DiscardPlan {

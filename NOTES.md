@@ -645,6 +645,24 @@
   boot log over USB, needs 0123), sm_reboot. Still manual: USB cable replug after boot (0127's soft
   disconnect/connect x6 does not reach the host: SM8550 eUSB2 repeater); x36g's SPMI probe panic (0x1000 stride)
   fixed in 0126b. Boot images now: x38g = kernel out-local-0127 + payload x38s (3 GiB, sweetnull +chronod).
+  **HANDOFF 2026-10-22 ~13:30 (user paused):** phone on x38g (kernel out-local-0127, Turnip flag ON: UI on the
+  Adreno). Working: lock screen (clock/date/camera), home icons + dock, Settings opens, widgets drawn by chronod in
+  BGRA (supportsFamily Apple2 in chronod only), no device-lost, no out-of-memory, GPU pool 2 GiB.
+  OPEN, in order:
+  1. USB ECM hung at ~13:05 (last live-log lines: repeated "setup 21 43 000e" SET_ETHERNET_PACKET_FILTER,
+     then nothing; host saw the device, en9 inactive, replug did not help; iOS kept running). After the
+     user's reboot read the previous boot's end with `sm_log` (ring persists) and fix sweet_usb.
+  2. Icon labels / status-bar time missing on the home screen since ~x35 (LA08 text surfaces? compare with
+     lavapipe: the UI dims/locks fast, wake it first; real power button wakes, a synthetic power press right
+     after sm_kill did not).
+  3. Widgets white, right edge clipped; wallpaper black; SpringBoard newHeapWithDescriptor (SweetMetalHeap.m
+     written, NOT built: build.sh excludes it; heaps were not the label/display culprit).
+  4. USB replug after boot still manual (0127 soft reconnect does not reach the host: eUSB2 repeater).
+  Hands-off flashing: `tools/phone-flash.sh shim/out/IMG` (needs the phone up on USB). Local kernel builds:
+  bt012 tree in the scratchpad (recreate from CI artifact 39704164232 + patches 0111..0127 if lost),
+  xnu-cc.py with Xcode 15.0.1 clang + tools/xnu-relink.sh on kit xnu/out-dm3q-019.
+  Patches of third-party trees saved: tools/turnip-ios/mesa-turnip-ios.patch,
+  sweetmetal/patches/metal2vulkan-dm3q-all.patch (alias, ROG, 16 MiB blocks, _RB4).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
