@@ -1,0 +1,259 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index e8fed40..3a59fa1 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -113,6 +113,7 @@ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/sweet_thermal.c			standard
++bsd/dev/sweet_gpu.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+new file mode 100644
+index 0000000..fcd995f
+--- /dev/null
++++ b/bsd/dev/sweet_gpu.c
+@@ -0,0 +1,221 @@
++/*
++ * DM3Q (Galaxy S23 Ultra, SM8550) Adreno 740: the shim (port/shim/gpu.c,
++ * built with DIAG=gpuboot) powers the GPU up before xnu starts: CX/GX power,
++ * GMU firmware + HFI, GPU SMMU context bank 0 (SIDs 0 and 1) with its own
++ * page tables, SQE microcode, ring, CP_ME_INIT, zap shader through TZ and
++ * CP_SET_SECURE_MODE 0. It leaves the GMU running with the GPU OOB held (GX
++ * stays powered) and describes everything in a handoff page at 0x9_c0100000
++ * (DDR above xnu's RAM, never managed by the VM).
++ *
++ * This file takes the running CP over: it checks the handoff, then submits
++ * CP_MEM_WRITE + cache-clean fence packets on the shim's ring from xnu and
++ * checks that they land, once at boot and every 10 s for a minute (the GPU
++ * must survive iOS starting up). Lines "SWEET GPU" in the console log.
++ * Boot-arg sweetgpu=0: off.
++ *
++ * Handoff layout (u64 words, shim/gpu.c handoff_write): 0 magic "SGPUA740",
++ * 1 version, 2 CB page pa, 3 GPU L1 table pa, 4 shim carve-out next free pa,
++ * 5 ring wptr (dwords), 6 kgsl-smmu base, 7 context bank, 8-9 shim region,
++ * 10-11 free pool for xnu (pa, size), 12-14 ring pa / gpu va / bytes,
++ * 15-16 memptrs pa / gpu va (+0 rptr shadow, +4 fence, +8 BV rptr),
++ * 17-18 sqe gpu va / size, 19-20 test page pa / gpu va, 21 first gpu va free,
++ * 22-23 GPU register block pa / size.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++void sweet_gpu_start(void);
++
++#define HANDOFF_PA      0x9c0100000ULL
++#define HANDOFF_MAGIC   0x3034374155504753ULL   /* "SGPUA740" */
++#define GMU_PA          0x03d7c000u             /* GMU CX block: HFI, OOB, AHB fence */
++#define GMU_SIZE        0x24000u
++#define MAP_PAGE        0x4000u
++
++/* GPU registers (offsets from 0x03d00000) */
++#define RBBM_STATUS             0x00840u
++#define CP_RB_RPTR              0x02018u
++#define CP_RB_WPTR              0x0201cu
++#define CP_HW_FAULT             0x02084u
++#define CP_INTERRUPT_STATUS     0x0208cu
++#define CP_ALWAYS_ON_COUNTER    0x02600u
++#define RBBM_SECVID_TRUST_CNTL  0x3d000u
++/* GMU registers (absolute) */
++#define GMU_FW_INIT_RESULT      0x03d7e070u
++#define GMU_GFX_PWR_CLK_STATUS  0x03d7e340u
++#define GMU_AHB_FENCE_STATUS    0x03d8ec4cu
++
++static struct {
++	bool started;
++	vm_offset_t ho, regs, gmu, ring, mem, test;
++	uint64_t ring_va, mem_va, test_va;
++	uint32_t ring_dw, wptr, seq;
++} g;
++
++static uint32_t
++rd(vm_offset_t a)
++{
++	return *(volatile uint32_t *)a;
++}
++
++static void
++wr(vm_offset_t a, uint32_t v)
++{
++	*(volatile uint32_t *)a = v;
++}
++
++static uint64_t
++ho(unsigned i)
++{
++	return *(volatile uint64_t *)(g.ho + 8u * i);
++}
++
++static uint32_t
++gmu_rd(uint32_t pa)
++{
++	return rd(g.gmu + (pa - GMU_PA));
++}
++
++static int g_sleep_chan;
++
++static void
++g_sleep(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&g_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* map [pa, pa + size) (any alignment) uncached; returns the va of pa, 0 on failure */
++static vm_offset_t
++map_pa(uint64_t pa, uint64_t size)
++{
++	uint64_t base = pa & ~(uint64_t)(MAP_PAGE - 1);
++	uint64_t len = (pa + size - base + MAP_PAGE - 1) & ~(uint64_t)(MAP_PAGE - 1);
++	vm_offset_t va = ml_io_map((vm_offset_t)base, (vm_size_t)len);
++	return va ? va + (vm_offset_t)(pa - base) : 0;
++}
++
++/* copy cmds into the ring, bump WPTR, wait up to 1 s for RPTR == WPTR and an idle RBBM; returns us or -1 */
++static int
++submit(const uint32_t *cmds, uint32_t n)
++{
++	for (uint32_t i = 0; i < n; i++) {
++		wr(g.ring + 4u * ((g.wptr + i) % g.ring_dw), cmds[i]);
++	}
++	g.wptr = (g.wptr + n) % g.ring_dw;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	wr(g.regs + CP_RB_WPTR, g.wptr);
++	if (gmu_rd(GMU_AHB_FENCE_STATUS) & 1u) {       /* the AHB fence dropped the write: retry */
++		delay(100);
++		wr(g.regs + CP_RB_WPTR, g.wptr);
++	}
++	for (int us = 0; us < 1000000; us += 10) {
++		if (rd(g.regs + CP_RB_RPTR) == g.wptr && !(rd(g.regs + RBBM_STATUS) & ~1u)) {
++			return us;
++		}
++		delay(10);
++	}
++	return -1;
++}
++
++/* CP_MEM_WRITE of a fresh value to the test page + cache-clean fence; true when both landed */
++static bool
++ping(const char *why)
++{
++	uint32_t val = 0x5e000000u | (++g.seq & 0xffffffu), fence = 0x100u + g.seq;
++	uint64_t dst = g.test_va + 0x10u, fva = g.mem_va + 4u;
++	const uint32_t cmds[13] = {
++		0x703d8003u, (uint32_t)dst, (uint32_t)(dst >> 32), val,        /* CP_MEM_WRITE */
++		0x70928000u,                                                    /* CP_WAIT_MEM_WRITES */
++		0x70460004u, 0x08000031u, (uint32_t)fva, (uint32_t)(fva >> 32), fence,  /* EVENT_WRITE CACHE_CLEAN + ts */
++		0x70268000u,                                                    /* CP_WAIT_FOR_IDLE */
++		0x70268000u, 0x70268000u,                                       /* pad */
++	};
++	uint32_t aon0 = rd(g.regs + CP_ALWAYS_ON_COUNTER);
++	int us = submit(cmds, 13);
++	uint32_t got = rd(g.test + 0x10u), gf = rd(g.mem + 4u);
++	bool ok = us >= 0 && got == val && gf == fence;
++	printf("SWEET GPU: %s #%u %s: %d us, write %08x (want %08x), fence %x, aon +%u, gx %x, rbbm %x, fault %x\n",
++	    why, g.seq, ok ? "OK" : "FAILED", us, got, val, gf, rd(g.regs + CP_ALWAYS_ON_COUNTER) - aon0,
++	    gmu_rd(GMU_GFX_PWR_CLK_STATUS), rd(g.regs + RBBM_STATUS), rd(g.regs + CP_HW_FAULT));
++	return ok;
++}
++
++static void
++gpu_thread(void *arg, wait_result_t result)
++{
++	(void)arg;
++	(void)result;
++	g.ho = map_pa(HANDOFF_PA, MAP_PAGE);
++	if (!g.ho || ho(0) != HANDOFF_MAGIC || ho(1) != 1) {
++		printf("SWEET GPU: no handoff from the shim (magic %llx): GPU not started\n", g.ho ? ho(0) : 0);
++		goto out;
++	}
++	g.regs = map_pa(ho(22), ho(23));
++	g.gmu = map_pa(GMU_PA, GMU_SIZE);
++	g.ring = map_pa(ho(12), ho(14));
++	g.mem = map_pa(ho(15), 0x1000);
++	g.test = map_pa(ho(19), 0x1000);
++	g.ring_va = ho(13);
++	g.mem_va = ho(16);
++	g.test_va = ho(20);
++	g.ring_dw = (uint32_t)(ho(14) / 4);
++	g.wptr = (uint32_t)ho(5);
++	if (!g.regs || !g.gmu || !g.ring || !g.mem || !g.test || !g.ring_dw) {
++		printf("SWEET GPU: MMIO mapping failed\n");
++		goto out;
++	}
++	printf("SWEET GPU: handoff ok: l1 %llx, ring %llx (va %llx), pool %llx +%llx MiB\n",
++	    ho(3), ho(12), g.ring_va, ho(10), ho(11) >> 20);
++	printf("SWEET GPU: state: gmu init %x, gx %x, rbbm %x, rptr %x wptr %x (handoff %x), secvid %x, cp int %x\n",
++	    gmu_rd(GMU_FW_INIT_RESULT), gmu_rd(GMU_GFX_PWR_CLK_STATUS), rd(g.regs + RBBM_STATUS),
++	    rd(g.regs + CP_RB_RPTR), rd(g.regs + CP_RB_WPTR), g.wptr, rd(g.regs + RBBM_SECVID_TRUST_CNTL),
++	    rd(g.regs + CP_INTERRUPT_STATUS));
++	if (rd(g.regs + CP_RB_RPTR) != g.wptr) {
++		printf("SWEET GPU: rptr != handoff wptr: not touching the ring\n");
++		goto out;
++	}
++	unsigned ok = 0;
++	for (unsigned i = 0; i < 7; i++) {
++		ok += ping(i ? "alive" : "first") ? 1u : 0u;
++		g_sleep(10000);
++	}
++	printf("SWEET GPU: %u/7 submits from xnu landed\n", ok);
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_gpu_start(void)
++{
++	int mode = 1;
++	thread_t thread;
++	if (g.started) {
++		return;
++	}
++	g.started = true;
++	(void)PE_parse_boot_argn("sweetgpu", &mode, sizeof(mode));
++	if (mode == 0) {
++		printf("SWEET GPU: off (sweetgpu=0)\n");
++		return;
++	}
++	kern_return_t kr = kernel_thread_start(gpu_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET GPU: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 14164f5..3f02316 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -54,6 +54,7 @@ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ extern void sweet_thermal_start(void);	/* DM3Q thermal guard (sweet_thermal.c) */
++extern void sweet_gpu_start(void);	/* DM3Q Adreno 740 takeover from the shim (sweet_gpu.c) */
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -662,6 +663,7 @@ sweet_ufs_init(void)
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
+ 	sweet_thermal_start();
++	sweet_gpu_start();
+ 	return 0;
+ }
+ 

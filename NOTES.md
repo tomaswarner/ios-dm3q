@@ -562,6 +562,11 @@
   idle at once, RBBM_SECVID_TRUST_CNTL 0, second CP_MEM_WRITE 0x600DF00D landed. Full A740 bring-up from bare metal
   under Gunyah DONE (shim/gpu.c DIAG=gpu6). qcom-scm.ko init_image/mem_setup = same SMC encoding as ours, no SHM bridge.
   NEXT: port the sequence into XNU (driver + user client, KGSL-XNU-DESIGN.md), then Turnip.
+  **Boot x23g (2026-10-21, photo + user: "Llegué al lockscreen"):** shim DIAG=gpuboot + payload-x22s: full A740
+  bring-up (ZAP OK, HANDOFF pa 0x9c0100000, gpu l1 0x9c006f000), then iOS boots to the lock screen with the GPU
+  running (GMU up, OOB held). GPU region 0x9c0000000-0xa00000000 is DDR above xnu's RAM (mkadt HIGH_*).
+  xnu 0111 (bsd/dev/sweet_gpu.c): takes the CP over from the handoff, 7 CP_MEM_WRITE+fence pings over 60 s, logs
+  "SWEET GPU". Patch generated against the CI 012 buildtree (gh run download -R tomaswarner/ios-dm3q -n xnu-buildtree).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
