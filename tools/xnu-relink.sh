@@ -13,6 +13,8 @@
 # Only for sources that need no regenerated headers (plain .c/.cpp edits; not iig, mig or config
 # changes): those still go through CI. No CTF section (dtrace type data) is added.
 set -euo pipefail
+# The linker must be Xcode 15's (CI's): Xcode 16+'s ld-prime folds __LASTDATA_CONST into __LAST.
+export DEVELOPER_DIR=${DEVELOPER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/xcode/Xcode_15.0.1.app/Contents/Developer}
 KIT=$(cd "$1" && pwd)
 OUT=$2
 shift 2
@@ -28,7 +30,10 @@ mkdir "$W/o" "$W/lib"
 (cd "$W/o" && xcrun ar x "$LINK/kernel.development.sweet.a")
 for n in "$@"; do
 	b=$(basename "$n")
-	case $b in *__*.o) b=${b##*__}; b=${b%.*.o}.o ;; esac   # xnu-cc's dir__file.c.o
+	case $b in   # xnu-cc's dir__file.c.o / dir__file.cpp.o -> the archive's file.o / file.cpo
+	*__*.cpp.o) b=${b##*__}; b=${b%.cpp.o}.cpo ;;
+	*__*.o) b=${b##*__}; b=${b%.*.o}.o ;;
+	esac
 	[ -f "$W/o/$b" ] || { echo "no archive member $b to replace" >&2; exit 1; }
 	cp "$n" "$W/o/$b"
 	echo "replaced $b"
@@ -37,14 +42,17 @@ done
 xcrun ar t "$LINK/kernel.development.sweet.a" | grep -vxE 'version.o|lastkerneldataconst.o|lastkernelconstructor.o|__.SYMDEF.*' |
 	sed "s|^|$W/o/|" > "$W/link.filelist"
 cp "$RL/libfirehose_kernel.a" "$W/lib/"
-CCKEXT=$(find "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang" -name libclang_rt.cc_kext.a | head -1)
+CCKEXT=$(find "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang" -name libclang_rt.cc_kext.a | head -1)
 ln -s "$CCKEXT" "$W/lib/libcc_kext.a"
 # CI's arguments without its -L (ours: $W/lib)
-ARGS=$(sed -e 's|-L[^ ]*fakeroot/usr/local/lib/kernel||g' "$LINK/kernel.development.sweet.linkarguments")
+# and without -rename_segment,__LASTDATA_CONST,__LAST, which CI's ld ignores ("not yet supported")
+# but ours applies (no __LASTDATA_CONST segment then)
+ARGS=$(sed -e 's|-L[^ ]*fakeroot/usr/local/lib/kernel||g' -e 's|-Wl,-rename_segment,__LASTDATA_CONST,__LAST||g' \
+	"$LINK/kernel.development.sweet.linkarguments")
 # shellcheck disable=SC2086
 xcrun clang++ $ARGS -L"$W/lib" \
 	-Wl,-alias_list,"$RL/all-alias.exp" -Wl,-sectcreate,__LINKINFO,__symbolsets,"$RL/symbolsets.plist" \
-	-Wl,-segprot,__LINKINFO,r--,r-- -Wl,-read_only_relocs,suppress \
+	-Wl,-segprot,__LINKINFO,r--,r-- \
 	-filelist "$W/link.filelist" "$W/o/version.o" "$W/o/lastkerneldataconst.o" "$W/o/lastkernelconstructor.o" \
 	"$RL/nonlto.o" -o "$W/kernel.unstripped" -lcc_kext -lfirehose_kernel 2>&1 |
 	grep -v "rename_segment not yet supported\|warning: -new_linker\|ignoring duplicate libraries" || true
