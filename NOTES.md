@@ -476,6 +476,16 @@
   Tools: crash symbolization = kernel log CRASH lines + `SWEETMETAL image` load addresses (atos on
   libvulkan_lvp.dylib / ipsw dyld a2s); traces on while /var/tmp/sweetmetal_trace exists (sm_touch).
   Open: newHeapWithDescriptor (SpringBoard asks, tolerates nil), speed (CPU rendering), touch/UI check.
+  **SPEED + HEAT (2026-10-21 ~22:00):** live stats (/var/tmp/sweetmetal_stats, every 10 s) showed backboardd's
+  passes over IOSurfaces as shadow images: ~5.2e9 texels copied in per 10 s (whole 1125x2436 surface per
+  pass), 64 command buffers pending, commit->completion up to 11 s. Fix (c7cc224, host-verified, NOT yet on
+  the phone): IOSurface textures as wide as the row pitch (no padding -> aliasable) + metal2vulkan patch
+  `sweetmetal/patches/metal2vulkan-alias-host-pages.patch` (M2V_ALIAS_HOST_PAGES: images may alias the
+  caller's host pages; lavapipe's layout moves never touch memory), default viewport/scissor = client size.
+  **The phone got very hot (user, ~22:00):** shim/perf.c pins all 3 CPU clusters at the top non-turbo EPSS
+  level since x12s and there is no thermal driver (only hardware LMh/DCVSH + PMIC shutdown), and lavapipe
+  ran 6 threads flat out for minutes. Before the next Metal run: fewer lavapipe threads (2-3), no pinned max
+  CPU (mid EPSS level or ABL's), a TSENS temperature readout in the log, and short sessions.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
