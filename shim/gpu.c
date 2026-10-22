@@ -263,7 +263,7 @@ static void s6_cx_gdsc(void)
 	udelay(1);
 	uint32_t us = poll(GPUCC_CX_GDSCR, 1u << 31, 1u << 31, 1500);
 	con_hex2("S6 CX GDSC", "gdscr=", rd(GPUCC_CX_GDSCR), "us=", us);
-	con_hex("S6 CX GDSC hw", rd(GPUCC_CX_GDSC_HW));
+	con_hex("S6 GDSC hw", rd(GPUCC_CX_GDSC_HW));
 	ok &= us != ~0u;
 	step(6, ok);
 }
@@ -410,6 +410,17 @@ void gpu_probe(void)
 	s5_gpucc_state();
 	s6_cx_gdsc();
 	s7_gmu_clocks();
+	/* the console clips at the bottom (probe 1 ran off it after S7): page 2 for S8-S10 */
+	{
+		char l1[16] = "S1-7 ";
+		for (int i = 1; i <= 7; i++)
+			l1[4 + i] = results[i];
+		l1[12] = 0;
+		con_clear(BLUE);	/* page 2 */
+		con_str("GPU1 page 2", "S1-7 on the previous page");
+		con_str("GPU1 S1-7", l1);
+		con_hex2("CX GDSC", "gdscr=", rd(GPUCC_CX_GDSCR), "cxgmu=", rd(GPUCC_CX_GMU));
+	}
 	s8_ident();
 	s9_tcm();
 	s10_scm();
@@ -418,5 +429,5 @@ void gpu_probe(void)
 		line[5 + i] = results[i];
 	line[16] = 0;
 	con_str("GPU1 RESULT", line);
-	con_hex("GPU1 failed steps", (uint32_t)failed);
+	con_hex("GPU1 failed", (uint32_t)failed);
 }
