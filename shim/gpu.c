@@ -55,6 +55,7 @@
 
 extern const uint8_t _gmu_fw_start[], _gmu_fw_end[];
 extern const uint8_t _sqe_fw_start[], _sqe_fw_end[];
+extern const uint8_t _zap_fw_start[], _zap_fw_end[];
 
 static inline uint32_t rd(uintptr_t a)
 {
@@ -768,6 +769,72 @@ static int ring_submit(uint64_t ring, uint32_t *wptr, const uint32_t *cmds, uint
 	return -1;
 }
 
+/* ---- probe 6 (DIAG=gpu6): zap shader through TZ PAS 13, then CP_SET_SECURE_MODE 0 ----
+ * STAGES-3PLUS s8.2 / Linux zap_shader_load_mdt + qcom_mdt_load / KGSL kgsl_zap_shader_load; ios-sailfish 0130.
+ * a740_zap.mbn: ELF header + 3 phdrs (0x94 B), PT_LOAD segment at file 0x1000 (0x430 B, paddr 0x1000), hash at 0x2000
+ * (0xf38 B). Metadata for INIT_IMAGE = mbn[0:0x94] + mbn[0x2000:0x2f38] (= the .mdt file). Region: DT gpu_micro_code_mem. */
+#define ZAP_REGION	0x9b09a000UL
+#define ZAP_META	(CARVE + 0xc0000UL)	/* 4 KiB aligned, contiguous, uncached (MMU off), not reused after */
+
+static void gpu6_zap(uint64_t ring, uint32_t *wptr, uint64_t test, uintptr_t cbp)
+{
+	con_clear(0xff006060U);		/* page 6: teal */
+	con_str("GPU6 page 6", "zap shader (TZ PAS 13) + leave secure mode");
+	const uint8_t *z = _zap_fw_start;
+	uint32_t zlen = (uint32_t)(_zap_fw_end - _zap_fw_start);
+	con_hex2("Z mbn", "len=", zlen, "magic=", (uint32_t)z[0] | z[1] << 8 | z[2] << 16 | (uint32_t)z[3] << 24);
+	if (zlen < 0x2f38 || z[0] != 0x7f) {
+		con_str("GPU6", "bad zap image");
+		return;
+	}
+	/* metadata: ELF header + phdrs, then the hash segment */
+	for (uint32_t o = 0; o < 0x1000; o += 4)
+		wr(ZAP_META + o, 0);
+	copy_words(ZAP_META, z, 0x94);
+	copy_words(ZAP_META + 0x94, z + 0x2000, 0xf38);
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	con_str("NEXT", "Z1 PAS_INIT_IMAGE");
+	struct smc_res r1 = scm4(0x42000201, 0x82, 13, ZAP_META, 0, 0);
+	con_hex2("Z1 init", "x0=", (uint32_t)r1.a0, "x1=", (uint32_t)r1.a1);
+	if (r1.a0 || r1.a1) {
+		con_str("GPU6 RESULT", "INIT_IMAGE refused");
+		return;
+	}
+	con_str("NEXT", "Z2 PAS_MEM_SETUP");
+	struct smc_res r2 = scm4(0x42000202, 3, 13, ZAP_REGION, 0x430, 0);
+	con_hex2("Z2 mem", "x0=", (uint32_t)r2.a0, "x1=", (uint32_t)r2.a1);
+	if (r2.a0 || r2.a1) {
+		con_str("GPU6 RESULT", "MEM_SETUP refused");
+		return;
+	}
+	con_str("NEXT", "Z3 copy segment");
+	copy_words(ZAP_REGION, z + 0x1000, 0x430);
+	__asm__ volatile("dsb sy" ::: "memory");
+	con_hex2("Z3 seg", "w0=", rd(ZAP_REGION), "w last=", rd(ZAP_REGION + 0x42c));
+	con_str("NEXT", "Z4 PAS_AUTH_AND_RESET");
+	struct smc_res r4 = scm4(0x42000205, 1, 13, 0, 0, 0);
+	con_hex2("Z4 auth", "x0=", (uint32_t)r4.a0, "x1=", (uint32_t)r4.a1);
+	if (r4.a0 || r4.a1) {
+		con_str("GPU6 RESULT", "AUTH_AND_RESET refused");
+		return;
+	}
+	/* CP_SET_SECURE_MODE 0, then a second memory write to prove the non-secure CP still works */
+	con_str("NEXT", "Z5 CP_SET_SECURE_MODE 0");
+	static const uint32_t unsec[2] = { 0x70e60001, 0 };
+	int ms = ring_submit(ring, wptr, unsec, 2, cbp);
+	con_hex2("Z5 secure", "ms=", (uint32_t)ms, "secvid=", rd(0x03d3d000));
+	if (ms < 0) {
+		con_str("GPU6 RESULT", "CP hung leaving secure mode");
+		return;
+	}
+	static const uint32_t again[6] = { 0x703d8003, (uint32_t)VA_TEST + 4, 0, 0x600df00du, 0x70928000, 0x70268000 };
+	ms = ring_submit(ring, wptr, again, 6, cbp);
+	con_hex2("Z6 write", "ms=", (uint32_t)ms, "test+4=", rd(test + 4));
+	con_str("GPU6 RESULT", rd(test + 4) == 0x600df00du && rd(0x03d3d000) == 0 ? "ZAP OK: GPU non-secure, writes work"
+										 : "zap ran: check secvid/test");
+}
+
 static void gpu5_cp(void)
 {
 	con_clear(0xff803000U);		/* page 5: brown */
@@ -904,6 +971,10 @@ static void gpu5_cp(void)
 				  : "CP did not execute the test");
 	if (!memok)
 		cp_dump("after test", c);
+#if defined(DIAG_GPU6)
+	if (ok && memok)
+		gpu6_zap(ring, &wptr, test, c);
+#endif
 }
 
 static void gpu4_gx_on(void)
@@ -943,7 +1014,7 @@ static void gpu4_gx_on(void)
 	con_hex2("P7 CP", "status1=", rd(0x03d02094), "hwfault=", rd(0x03d02094 - 0x10));	/* CP_STATUS_1, CP_HW_FAULT 0x03d02084 */
 	con_hex2("P7 CP", "aon ctr=", rd(0x03d02600), "intstat=", rd(0x03d0208c));		/* CP_ALWAYS_ON_COUNTER, CP_INTERRUPT_STATUS */
 	con_str("GPU4 RESULT", "GX ON at 220 MHz (OOB held)");
-#if defined(DIAG_GPU5)
+#if defined(DIAG_GPU5) || defined(DIAG_GPU6)
 	gpu5_cp();
 #endif
 	/* drop the OOB: the GMU may collapse GX again; the M3 is put back in reset by the caller */
@@ -1239,7 +1310,7 @@ void gpu2_probe(void)
 		uint32_t us = poll(0x03d7e600, 1, 1, 50000);
 		con_hex2("P5 HFI", "status=", rd(0x03d7e600), "us=", us);
 		results[0] = us != ~0u ? 'o' : 'X';
-#if defined(DIAG_GPU3) || defined(DIAG_GPU5)
+#if defined(DIAG_GPU3) || defined(DIAG_GPU5) || defined(DIAG_GPU6)
 		if (us != ~0u) {
 			hfi_pa = hfi;
 			gpu3_hfi();
