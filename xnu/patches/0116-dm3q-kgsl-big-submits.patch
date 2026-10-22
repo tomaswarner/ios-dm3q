@@ -1,0 +1,72 @@
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+index b2a9e20..8a90dc5 100644
+--- a/bsd/dev/sweet_kgsl.c
++++ b/bsd/dev/sweet_kgsl.c
+@@ -185,7 +185,7 @@ _Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
+ #define MAX_BO          4096
+ #define MAX_CTX         256
+ #define MAX_OPEN        64
+-#define MAX_IB          64
++#define MAX_IB          4096            /* per GPU_COMMAND (CoreAnimation frames: hundreds; 0114 had 64 -> EINVAL -> device lost) */
+ #define PKT7(op, cnt)   (0x70000000u | ((uint32_t)(cnt) & 0x3fffu) | (parity((uint32_t)(cnt)) << 15) | \
+ 	                 (((uint32_t)(op) & 0x7fu) << 16) | (parity((uint32_t)(op)) << 23))
+ #define CP_NOP                  0x10
+@@ -640,14 +640,33 @@ ctx_destroy(int owner, uint32_t id)
+  * submission (minus preemption, profiling, secure mode, context switch): IFPC off marker, the IBs
+  * between IB1LIST markers, CCU invalidates, the context timestamp, IFPC on marker.
+  */
++static int gpu_command_build(int owner, struct kgsl_gpu_command *cmd, uint32_t *pkt);
++
+ static int
+ gpu_command(int owner, struct kgsl_gpu_command *cmd)
+ {
+-	uint32_t pkt[4 * MAX_IB + 48], n = 0;
+-	struct kgsl_command_object obj;
+-	if (cmd->numcmds > MAX_IB || (cmd->numcmds && cmd->cmdsize < sizeof(obj))) {
++	if (cmd->numcmds > MAX_IB || (cmd->numcmds && cmd->cmdsize < sizeof(struct kgsl_command_object))) {
++		printf("SWEET KGSL: GPU_COMMAND refused: %u IBs, cmdsize %u\n", cmd->numcmds, cmd->cmdsize);
+ 		return EINVAL;
+ 	}
++	size_t bytes = (4u * (size_t)cmd->numcmds + 48u) * 4u;
++	uint32_t *pkt = (uint32_t *)kalloc_data(bytes, Z_WAITOK);
++	if (!pkt) {
++		return ENOMEM;
++	}
++	int err = gpu_command_build(owner, cmd, pkt);
++	kfree_data(pkt, bytes);
++	if (err) {
++		printf("SWEET KGSL: GPU_COMMAND ctx %u (%u IBs) -> error %d\n", cmd->context_id, cmd->numcmds, err);
++	}
++	return err;
++}
++
++static int
++gpu_command_build(int owner, struct kgsl_gpu_command *cmd, uint32_t *pkt)
++{
++	uint32_t n = 0;
++	struct kgsl_command_object obj;
+ 	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
+ 	pkt[n++] = THREAD_BOTH;
+ 	pkt[n++] = PKT7(CP_SET_MARKER, 1);
+@@ -698,7 +717,12 @@ gpu_command(int owner, struct kgsl_gpu_command *cmd)
+ 	pkt[n++] = 0x100;                               /* IFPC enable */
+ 	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
+ 	pkt[n++] = THREAD_BR;
+-	int err = sweet_gpu_ring_write(pkt, n);         /* under kgsl_mtx: ring order == timestamp order */
++	/* under kgsl_mtx: ring order == timestamp order; in pieces a quarter of the ring long, so a submit
++	 * larger than the ring streams through it (the CP runs up to WPTR meanwhile) */
++	int err = 0;
++	for (uint32_t off = 0; off < n && !err; off += 2048) {
++		err = sweet_gpu_ring_write(pkt + off, n - off < 2048 ? n - off : 2048);
++	}
+ 	lck_mtx_unlock(&kgsl_mtx);
+ 	if (err) {
+ 		printf("SWEET KGSL: ring full (CP hung?), hw fault %x\n", sweet_gpu_reg(CP_HW_FAULT));
+@@ -714,6 +738,7 @@ static int
+ wait_ts(int owner, struct kgsl_device_waittimestamp_ctxtid *w)
+ {
+ 	if (!ctx_get(owner, w->context_id)) {
++		printf("SWEET KGSL: WAITTIMESTAMP on unknown ctx %u\n", w->context_id);
+ 		return EINVAL;
+ 	}
+ 	unsigned ctx = w->context_id - 1;

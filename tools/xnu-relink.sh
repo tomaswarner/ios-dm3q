@@ -44,10 +44,10 @@ ARGS=$(sed -e 's|-L[^ ]*fakeroot/usr/local/lib/kernel||g' "$LINK/kernel.developm
 # shellcheck disable=SC2086
 xcrun clang++ $ARGS -L"$W/lib" \
 	-Wl,-alias_list,"$RL/all-alias.exp" -Wl,-sectcreate,__LINKINFO,__symbolsets,"$RL/symbolsets.plist" \
-	-Wl,-segprot,__LINKINFO,r--,r-- \
+	-Wl,-segprot,__LINKINFO,r--,r-- -Wl,-read_only_relocs,suppress \
 	-filelist "$W/link.filelist" "$W/o/version.o" "$W/o/lastkerneldataconst.o" "$W/o/lastkernelconstructor.o" \
 	"$RL/nonlto.o" -o "$W/kernel.unstripped" -lcc_kext -lfirehose_kernel 2>&1 |
-	grep -v "rename_segment not yet supported\|warning: -new_linker" || true
+	grep -v "rename_segment not yet supported\|warning: -new_linker\|ignoring duplicate libraries" || true
 [ -f "$W/kernel.unstripped" ] || { echo "link failed" >&2; exit 1; }
 xcrun strip -S "$W/kernel.unstripped" -o "$OUT"
 ls -l "$OUT"
