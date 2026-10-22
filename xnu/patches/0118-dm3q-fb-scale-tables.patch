@@ -1,0 +1,107 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 8831094..8151626 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -112,6 +112,9 @@ public:
+ 	uint32_t      fSwapID;
+ 	bool          fConsolePaused;
+ 	bool          fFill;            /* DM3Q: scale the logical display to fill the panel */
++	uint16_t     *fXMap, *fYMap;    /* DM3Q fill: logical x / y of each panel column / row (no divides per pixel) */
++	uint64_t      fPresentAbs, fPresentMaxAbs;      /* present() time, for the log every 128 frames */
++	uint32_t      fPresents;
+ 	void          presentScaled(SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
+ 	    int32_t dx, int32_t dy, int32_t w, int32_t h);
+ 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+@@ -264,8 +267,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
++		uint64_t t0 = mach_absolute_time();
+ 		fb->present(rec);
++		uint64_t dt = mach_absolute_time() - t0;
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++		fb->fPresentAbs += dt;
++		if (dt > fb->fPresentMaxAbs) {
++			fb->fPresentMaxAbs = dt;
++		}
++		if (++fb->fPresents % 128 == 0) {
++			uint64_t avg, max;
++			absolutetime_to_nanoseconds(fb->fPresentAbs / 128, &avg);
++			absolutetime_to_nanoseconds(fb->fPresentMaxAbs, &max);
++			IOLog("SWEET FB: present %u frames: mean %llu us, max %llu us (panel copy, CPU)\n", fb->fPresents,
++			    avg / 1000, max / 1000);
++			fb->fPresentAbs = fb->fPresentMaxAbs = 0;
++		}
+ 	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+@@ -331,6 +348,19 @@ AppleCLCD::presentScaled(SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
+ {
+ 	const int64_t num = fWidth, den = fLogicalW;
+ 	const int64_t cropY = ((int64_t)fLogicalH * num / den - fHeight) / 2;
++	if (fXMap == NULL) {
++		fXMap = (uint16_t *)IOMallocData(sizeof(uint16_t) * fWidth);
++		fYMap = (uint16_t *)IOMallocData(sizeof(uint16_t) * fHeight);
++		if (fXMap == NULL || fYMap == NULL) {
++			return;
++		}
++		for (int64_t px = 0; px < (int64_t)fWidth; px++) {
++			fXMap[px] = (uint16_t)(px * den / num);
++		}
++		for (int64_t py = 0; py < (int64_t)fHeight; py++) {
++			fYMap[py] = (uint16_t)((py + cropY) * den / num);
++		}
++	}
+ 	if (w > (int32_t)s->width - sx) {
+ 		w = (int32_t)s->width - sx;
+ 	}
+@@ -342,20 +372,28 @@ AppleCLCD::presentScaled(SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
+ 	    s->memory->getLength()) {
+ 		return;
+ 	}
++	/* panel columns whose logical x is in [dx, dx + w): the map is monotonic */
+ 	int64_t px0 = dx * num / den, px1 = ((int64_t)(dx + w) * num + den - 1) / den;
+-	int64_t py0 = dy * num / den - cropY, py1 = ((int64_t)(dy + h) * num + den - 1) / den - cropY;
+ 	if (px1 > (int64_t)fWidth) {
+ 		px1 = fWidth;
+ 	}
++	while (px0 < px1 && fXMap[px0] < dx) {
++		px0++;
++	}
++	while (px1 > px0 && fXMap[px1 - 1] >= dx + w) {
++		px1--;
++	}
++	int64_t py0 = dy * num / den - cropY, py1 = ((int64_t)(dy + h) * num + den - 1) / den - cropY;
+ 	if (py0 < 0) {
+ 		py0 = 0;
+ 	}
+ 	if (py1 > (int64_t)fHeight) {
+ 		py1 = fHeight;
+ 	}
++	const uint16_t *xmap = fXMap;
+ 	int64_t prev = -1;
+ 	for (int64_t py = py0; py < py1; py++) {
+-		int64_t ly = (py + cropY) * den / num;
++		int64_t ly = fYMap[py];
+ 		if (ly < dy || ly >= dy + h) {
+ 			continue;
+ 		}
+@@ -366,16 +404,11 @@ AppleCLCD::presentScaled(SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
+ 			continue;
+ 		}
+ 		prev = ly;
++		/* indexed by logical x */
+ 		const uint32_t *srow = (const uint32_t *)(src + s->offset +
+ 		    (uint64_t)(sy + ly - dy) * s->bytesPerRow) + sx - dx;
+ 		for (int64_t px = px0; px < px1; px++) {
+-			int64_t lx = px * den / num;
+-			if (lx >= dx + w) {
+-				break;
+-			}
+-			if (lx >= dx) {
+-				drow[px] = srow[lx];
+-			}
++			drow[px] = srow[xmap[px]];
+ 		}
+ 	}
+ }
