@@ -335,9 +335,12 @@ static void s9_tcm(void)
 			break;
 		blocks++;
 		uintptr_t dst = 0;
-		if (type == 0 && size && addr + size <= 0x4000)
+		/* Linux a6xx_gmu_fw_load loads every block with a size (data blocks carry type 0xdeadbeef
+		 * in this file; the zero-size ones are PREALLOC requests) */
+		(void)type;
+		if (size && addr + size <= 0x4000)
 			dst = GMU_ITCM + addr;
-		else if (type == 0 && size && addr >= 0x10004000u && addr + size <= 0x10008000u)
+		else if (size && addr >= 0x10004000u && addr + size <= 0x10008000u)
 			dst = GMU_DTCM + (addr - 0x10004000u);
 		if (dst) {
 			loaded++;
@@ -395,6 +398,10 @@ static void s10_scm(void)
 	con_hex2("S10 avail init", "x0=", (uint32_t)r2.a0, "x1=", (uint32_t)r2.a1);
 	con_hex2("S10 pas13", "x0=", (uint32_t)r3.a0, "x1=", (uint32_t)r3.a1);
 	con_hex2("S10 avail gpuregs", "x0=", (uint32_t)r4.a0, "x1=", (uint32_t)r4.a1);
+	/* calibrate PAS_IS_SUPPORTED on peripherals Android loads through PAS: adsp 1, modem 4, cdsp 18 */
+	struct smc_res p1 = scm(0x42000207, 1, 1), p4 = scm(0x42000207, 1, 4), p18 = scm(0x42000207, 1, 18);
+	con_hex2("S10 pas1/pas4", "x1=", (uint32_t)p1.a1, "x1=", (uint32_t)p4.a1);
+	con_hex2("S10 pas18", "x0=", (uint32_t)p18.a0, "x1=", (uint32_t)p18.a1);
 	step(10, r1.a0 == 0 && r3.a0 == 0 && r3.a1 == 1);
 }
 
