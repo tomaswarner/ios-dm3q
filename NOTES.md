@@ -600,6 +600,13 @@
   submits retire: vkCmdFillBuffer filled 1 MiB with a740a740 (0 wrong words), vkCmdUpdateBuffer wrote its 16 bytes,
   submit -> fence 1.71 ms. VULKAN TEST PASSED. (0113 without the wrapping: the first Turnip submit never retired.)
   NEXT: render pass test (clear + triangle into an image, read back), then SweetMetal: metal2vulkan on Turnip.
+  **🎉 METAL ON THE ADRENO 740 (sm_smoke via sweetrun, 2026-10-22 10:30):** /usr/lib/libvulkan.dylib mini-loader now
+  picks Turnip when /var/tmp/sweet_vk_turnip exists (or $SWEET_VK_ICD), lavapipe otherwise (installed with new
+  tools/sweettest/sm_cp.c). sm_smoke on Turnip: compute 1024/1024, render 64/64, texture 256/256, depth 64/64; FAIL only
+  "surface pipeline/texture: Unsupported HostMemory needs ExtExternalMemoryHost" (IOSurface / no-copy import).
+  Flag removed again (system stays on lavapipe). NEXT: VK_EXT_external_memory_host on Turnip-KGSL: xnu ioctl that
+  wires user pages and maps them into the GPU table (own VA range, L3 tables), Turnip import path using it.
+  USB note (user): the cable must be unplugged/replugged after boot for the USB link to come up.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
