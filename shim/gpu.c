@@ -387,6 +387,19 @@ static struct smc_res scm(uint64_t fn, uint64_t arginfo, uint64_t a2)
 	return (struct smc_res){ x0, x1, x2, x3 };
 }
 
+/* SCM call with four value arguments (x2..x5) */
+static struct smc_res scm4(uint64_t fn, uint64_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+	register uint64_t x0 __asm__("x0") = fn, x1 __asm__("x1") = arginfo, x2 __asm__("x2") = a0;
+	register uint64_t x3 __asm__("x3") = a1, x4 __asm__("x4") = a2, x5 __asm__("x5") = a3;
+	register uint64_t x6 __asm__("x6") = 0;
+	__asm__ volatile("smc #0"
+			 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
+			 :
+			 : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	return (struct smc_res){ x0, x1, x2, x3 };
+}
+
 static void s10_scm(void)
 {
 	con_str("NEXT", "S10 SCM");
@@ -833,6 +846,14 @@ static void gpu5_cp(void)
 	wr(0x03d238a0, rd(0x03d238a0) | (1u << 11));	/* RB_CMP_DBG_ECO_CNTL */
 	wr(0x03d000e0, 0);			/* RBBM_INT_0_MASK: poll only */
 	con_hex2("P9 readback", "cacheways=", rd(0x03d0385c), "cmdq=", rd(0x03d038f0));
+
+	/* TZ: let the CP use the SMMU aperture of CB 0 (Linux adreno_hw_init -> qcom_scm_set_gpu_smmu_aperture(0),
+	 * KGSL kgsl_set_smmu_aperture; done before the SQE starts). SVC_MP 0x0c cmd 0x1b, ARGS(4). */
+	con_str("NEXT", "P10 scm smmu aperture");
+	struct smc_res av = scm(0x42000601, 1, 0x02000c1b);	/* IS_CALL_AVAIL(SVC_MP 0x0c, cmd 0x1b) */
+	con_hex2("P10 aperture", "avail x0=", (uint32_t)av.a0, "x1=", (uint32_t)av.a1);
+	struct smc_res ap = scm4(0x42000c1b, 4, 0xffff0000u | cb, 0xffffffffu, 0xffffffffu, 0xffffffffu);
+	con_hex2("P10 aperture", "set x0=", (uint32_t)ap.a0, "x1=", (uint32_t)ap.a1);
 
 	/* SQE + ring */
 	con_str("NEXT", "P10 sqe start");

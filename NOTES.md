@@ -532,6 +532,10 @@
   0x6690e), SQE started (always-on counter running, HW_FAULT 0), but ME_INIT never consumed: GPU CB FSR 0x408 FAR
   0x1000B000 (= SQE VA) FSYNR0 0x63 -> privileged instruction fetch permission fault (same implicit PXN as the GMU):
   SQE pages must be AP=00. CP_INTERRUPT_STATUS 0x80, CP_STATUS_1 0x80000006, RBBM_STATUS 0x00800005. gpu5b: SQE AP=00.
+  **gpu5b (photo):** with the SQE mapped AP=00 the SoC RESETS (phone off) right after writing CP_SQE_CNTL=1 (no line
+  after "NEXT P10 sqe start", < ~1 ms): the microcode now runs. Suspect: Linux/KGSL call qcom_scm_set_gpu_smmu_aperture(0)
+  (SVC_MP 0x0c cmd 0x1b, args 0xffff0000|cb, ~0, ~0, ~0) BEFORE starting the SQE; without it the CP's access to the
+  CB0 aperture is an XPU violation -> reset. gpu5c: IS_CALL_AVAIL + that SCM call before CP_SQE_CNTL.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
