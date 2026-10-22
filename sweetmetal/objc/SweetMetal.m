@@ -317,9 +317,16 @@ MISSING_LOGGER
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block { [_completed addObject:[block copy]]; }
 - (void)enqueue { _status = MTLCommandBufferStatusEnqueued; }
 
+/* window-server profiling (sm_stats_thread) */
+static _Atomic uint64_t stat_commits, stat_completed, stat_latency_us, stat_draws;
+
+void sm_count_draw(void) { stat_draws++; }
+
 - (void)commit
 {
 	SMTRACE("commit %p", self);
+	stat_commits++;
+	CFTimeInterval t0 = CFAbsoluteTimeGetCurrent();
 	_status = MTLCommandBufferStatusCommitted;
 	if (!sm_command_buffer_commit(_cb)) {
 		_error = sm_error(@"commit");
@@ -340,6 +347,8 @@ MISSING_LOGGER
 			self->_status = MTLCommandBufferStatusCompleted;
 		}
 		SMTRACE("completed %p status %ld", (__bridge void *)self, (long)self->_status);
+		stat_completed++;
+		stat_latency_us += (uint64_t)((CFAbsoluteTimeGetCurrent() - t0) * 1e6);
 		dispatch_async(handlers, ^{
 			for (MTLCommandBufferHandler h in self->_completed)
 				h(self);
@@ -439,6 +448,41 @@ MISSING_LOGGER
 
 - (sm_device *)sm { return _dev; }
 
+/* While /var/tmp/sweetmetal_stats exists: every 10 s, commits, completions, mean commit-to-completion
+ * latency, draws, and the runtime counters that changed. */
+- (void)startStats
+{
+	sm_device *dev = _dev;
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+		NSMutableDictionary<NSString *, NSNumber *> *last = [NSMutableDictionary dictionary];
+		static char buf[1 << 16];
+		for (;;) {
+			sleep(10);
+			if (access("/var/tmp/sweetmetal_stats", F_OK) != 0)
+				continue;
+			uint64_t c = stat_commits, d = stat_completed, l = stat_latency_us, dr = stat_draws;
+			static uint64_t pc, pd, pl, pdr;
+			SMLOG("stats 10s: %llu commits, %llu completed, mean latency %.1f ms, %llu draws, %llu pending",
+			      c - pc, d - pd, d > pd ? (l - pl) / 1e3 / (d - pd) : 0.0, dr - pdr, c - d);
+			pc = c, pd = d, pl = l, pdr = dr;
+			sm_device_work_counts(dev, buf, sizeof buf);
+			NSString *text = @(buf);
+			NSMutableString *line = [NSMutableString string];
+			for (NSString *row in [text componentsSeparatedByString:@"\n"]) {
+				NSArray *kv = [row componentsSeparatedByString:@" "];
+				if (kv.count != 2)
+					continue;
+				long long v = [kv[1] longLongValue], prev = [last[kv[0]] longLongValue];
+				if (v != prev)
+					[line appendFormat:@" %@+%lld", kv[0], v - prev];
+				last[kv[0]] = @(v);
+			}
+			for (NSUInteger i = 0; i < line.length; i += 700)
+				SMLOG("counts%s", [line substringWithRange:NSMakeRange(i, MIN(700, line.length - i))].UTF8String);
+		}
+	});
+}
+
 /* Metal's private protocols (MTLAddDevice asserts MTLDeviceSPI); added at run time from the
  * protocols Metal registers, as the SDK has no headers for them. */
 + (void)load
@@ -471,6 +515,10 @@ MISSING_LOGGER
 	/* lavapipe rasterizes on LP_NUM_THREADS threads (all cores by default); leave two cores to
 	 * the rest of the system (USB, input, the window server's own threads) */
 	setenv("LP_NUM_THREADS", "6", 0);
+	/* lavapipe's layout transitions never touch memory: let IOSurface textures alias their pages
+	 * (metal2vulkan local patch, see third_party/metal2vulkan-patches) */
+	if (access("/var/tmp/sweetmetal_noalias", F_OK) != 0)
+		setenv("M2V_ALIAS_HOST_PAGES", "1", 0);
 	_dev = sm_device_create();
 	if (!_dev) {
 		sm_error(@"device");
@@ -485,6 +533,7 @@ MISSING_LOGGER
 	_air = [NSMutableDictionary dictionary];
 	_pipelines = [NSMutableDictionary dictionary];
 	SMLOG("device up: %s, accelerator port %u", _name.UTF8String, port);
+	[self startStats];
 	/* load addresses, to symbolize crash backtraces from the kernel log */
 	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
 		const char *n = _dyld_get_image_name(i);

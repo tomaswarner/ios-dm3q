@@ -20,6 +20,8 @@ const char *sm_last_error(void);
 sm_device *sm_device_create(void);
 void sm_device_name(const sm_device *dev, char *buf, size_t len);
 void sm_device_release(sm_device *dev);
+/* the runtime's nonzero work counters, "name value\n" lines (profiling; not Metal API) */
+void sm_device_work_counts(const sm_device *dev, char *buf, size_t len);
 
 sm_buffer *sm_buffer_new(const sm_device *dev, uint64_t length);
 uint8_t *sm_buffer_contents(const sm_buffer *buf);

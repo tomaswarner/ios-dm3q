@@ -128,6 +128,32 @@ fn vulkan_loader() -> Option<std::path::PathBuf> {
     cfg!(target_os = "ios").then(|| "/usr/lib/libvulkan.dylib".into())
 }
 
+/// The runtime's work counters (`Device::work_counts`, not Metal API) as `name value` lines, only the
+/// nonzero ones, into `buf` (NUL-terminated, truncated). For profiling the window server.
+#[no_mangle]
+pub unsafe extern "C" fn sm_device_work_counts(dev: *const Device, buf: *mut c_char, len: usize) {
+    if dev.is_null() || buf.is_null() || len == 0 {
+        return;
+    }
+    let text = format!("{:?}", (*dev).work_counts());
+    let mut out = String::new();
+    // `WorkCounts { a: 1, b: 0, ... }` -> "a 1\n" for the nonzero fields
+    let body = text.trim_start_matches("WorkCounts {").trim_end_matches('}');
+    for field in body.split(", ") {
+        if let Some((k, v)) = field.trim().split_once(": ") {
+            if v != "0" && !v.is_empty() {
+                out.push_str(k);
+                out.push(' ');
+                out.push_str(v);
+                out.push('\n');
+            }
+        }
+    }
+    let n = out.len().min(len - 1);
+    ptr::copy_nonoverlapping(out.as_ptr(), buf as *mut u8, n);
+    *buf.add(n) = 0;
+}
+
 /// The device name (`-[MTLDevice name]`), copied into `buf` (NUL-terminated, truncated).
 #[no_mangle]
 pub unsafe extern "C" fn sm_device_name(dev: *const Device, buf: *mut c_char, len: usize) {

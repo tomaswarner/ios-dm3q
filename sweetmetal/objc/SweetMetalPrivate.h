@@ -49,6 +49,7 @@ BOOL sm_trace(void);
 	}
 
 NSError *sm_error(NSString *what);
+void sm_count_draw(void);
 
 /* The pixel format sweetmetal stores for a Metal one. CoreAnimation renders the P3 display's
  * surfaces ('b3a8') in the 32-bit extended-range formats; the kernel's framebuffer copies plane 0

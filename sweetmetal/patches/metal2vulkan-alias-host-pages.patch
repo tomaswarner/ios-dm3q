@@ -1,0 +1,40 @@
+diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-runtime/src/texture.rs
+index 9ad31de..1135c0b 100644
+--- a/crates/metal2vulkan-runtime/src/texture.rs
++++ b/crates/metal2vulkan-runtime/src/texture.rs
+@@ -2040,7 +2040,8 @@ impl Device {
+         // usage. A CPU write to the bytes then could be undone, where Metal keeps every one, and
+         // Metal's contract leaves no moment the CPU may not write them. The shadow's copies
+         // address its texels alone, through the buffer.
+-        let host = texels.buffer.caller_memory() == Some(CallerMemory::HostPages);
++        let host = texels.buffer.caller_memory() == Some(CallerMemory::HostPages)
++            && !alias_host_pages();
+         // The plans a linear image aliasing the bytes is tried with, the first the device makes:
+         // with the feedback loop usage a draw takes that reads the texture its own pass renders
+         // through a snapshot (`feedback_candidate`, `texture/attached_reads.rs`), which costs a
+@@ -2330,6 +2331,9 @@ impl Device {
+     ) -> Result<Aliased, Error> {
+         match texels.buffer.caller_memory() {
+             None => {}
++            // lavapipe (M2V_ALIAS_HOST_PAGES): an image bound to the imported host memory as to
++            // the runtime's own; its layout moves touch no memory there.
++            Some(CallerMemory::HostPages) if alias_host_pages() => {}
+             Some(CallerMemory::HostPages) => {
+                 return Err(internal("an aliasing image over the caller's host pages"));
+             }
+@@ -3610,6 +3614,15 @@ impl Drop for Staging<'_> {
+ }
+ 
+ /// The host pages an image is bound to, as its first move notes them (`texture/first_move.rs`).
++/// Whether textures may alias the caller's host pages (environment `M2V_ALIAS_HOST_PAGES` set):
++/// for a driver whose layout transitions never touch an image's memory (lavapipe), where the
++/// window server renders straight into its IOSurfaces instead of through a shadow it copies the
++/// whole surface into for every pass. Off by default (the refusal above is Metal's contract).
++fn alias_host_pages() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("M2V_ALIAS_HOST_PAGES").is_some())
++}
++
+ fn pages_hold(pages: &Arc<HostPages>) -> Option<Weak<dyn Any + Send + Sync>> {
+     let pages: Weak<dyn Any + Send + Sync> = Arc::downgrade(pages) as _;
+     Some(pages)

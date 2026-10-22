@@ -308,6 +308,16 @@ static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
 		return nil;
 	}
 	sm_texture_desc td = texture_desc(d);
+	/* A surface whose rows are padded (the window server's: 1125 texels in 4544-byte rows) would be
+	 * a shadow image the runtime copies the whole surface into for every pass (Vulkan may write a
+	 * linear image's row padding; Metal never does). The padding of a 4-byte-texel surface is no
+	 * one's data, so the image takes the full row: as wide as the pitch, it aliases the surface's
+	 * bytes and passes render into them directly. The texture still answers the width asked.
+	 * SWEETMETAL_NO_WIDEN (env) or /var/tmp/sweetmetal_nowiden turns it off. */
+	uint32_t bpp = td.pixel_format == 80 || td.pixel_format == 81 || td.pixel_format == 70 || td.pixel_format == 71 ? 4 : 0;
+	if (bpp && plane == 0 && d.textureType == MTLTextureType2D && bpr % bpp == 0 && bpr / bpp > td.width &&
+	    !getenv("SWEETMETAL_NO_WIDEN") && access("/var/tmp/sweetmetal_nowiden", F_OK) != 0)
+		td.width = bpr / bpp;
 	sm_texture *t;
 	if (planes > 1 && td.pixel_format == (uint32_t)d.pixelFormat) {
 		sm_surface_facts facts = {
@@ -621,6 +631,7 @@ fail:
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)start vertexCount:(NSUInteger)n
 	 instanceCount:(NSUInteger)inst baseInstance:(NSUInteger)base
 {
+	sm_count_draw();
 	SMTRACE("draw prim %lu start %lu count %lu x%lu", (unsigned long)t, (unsigned long)start, (unsigned long)n, (unsigned long)inst);
 	CHECK(sm_render_draw(_e, (uint32_t)t, (uint32_t)start, (uint32_t)n, (uint32_t)inst, (uint32_t)base), "drawPrimitives");
 }
@@ -639,6 +650,7 @@ fail:
 		  indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)off instanceCount:(NSUInteger)inst
 		   baseVertex:(NSInteger)bv baseInstance:(NSUInteger)bi
 {
+	sm_count_draw();
 	SMTRACE("drawIndexed prim %lu count %lu type %lu x%lu", (unsigned long)t, (unsigned long)n, (unsigned long)it, (unsigned long)inst);
 	HOLD(ib);
 	CHECK(sm_render_draw_indexed(_e, (uint32_t)t, (uint32_t)n, (uint32_t)it, ((SweetMTLBuffer *)ib).sm, off,
@@ -874,6 +886,14 @@ static sm_pass_depth_stencil pass_ds(MTLRenderPassAttachmentDescriptor *a, doubl
 	if (!e) {
 		sm_error(@"renderCommandEncoderWithDescriptor");
 		return nil;
+	}
+	/* Metal's default viewport and scissor are the attachment's size: the size the client sees,
+	 * which a widened surface texture (newTextureWithDescriptor:iosurface:plane:) is narrower than */
+	id<MTLTexture> first = d.colorAttachments[0].texture ?: d.depthAttachment.texture;
+	if (first) {
+		NSUInteger w = MAX(first.width >> d.colorAttachments[0].level, 1u), h = MAX(first.height >> d.colorAttachments[0].level, 1u);
+		sm_render_set_viewport(e, 0, 0, w, h, 0, 1);
+		sm_render_set_scissor(e, 0, 0, w, h);
 	}
 	return [[SweetMTLRenderCommandEncoder alloc] initWithDevice:self.device encoder:e held:self.held];
 }
