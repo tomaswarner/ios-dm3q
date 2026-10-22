@@ -515,6 +515,11 @@
   CORE_FW_START 14, START 10 + GX_BW_PERF_VOTE 30; probe 4 = GPU_CC PLLs + OOB GX up; probe 5 = GPU SMMU SID 0
   + SQE + ring + ME_INIT; probe 6 = CP_MEM_WRITE). Prior art: github.com/joranv1/ios-sailfish (Adreno 530,
   freedreno GL in backboardd; analysis in docs/dm3q/gpu/SAILFISH-LESSONS.md when the helper finishes).
+  **gpu3 (HFI, photo):** all 5 messages ACKED in order: this fw acks as {hdr type 1 (ACK), id = the command's id,
+  size 3; our header; error} (not id 126) - probe matched only 126 so it printed "timeout". rpmh state 0xF -> 0x0
+  after START; gfx vote 220 MHz = 0x00340201, cx 0x00400202/0x00800303; BW addrs cn0 0x50038 sh0 0x50004 mc0 0x50000
+  acv 0x50068; GX pwrclk 3 (off, as expected). gpu4 = gpu3 build with the ack fix + GPU_CC PLL0/1 config if L=0 +
+  OOB_GPU_SET + GFX_PWR_CLK_STATUS poll + first GX reads (RBBM_STATUS etc, addresses from STAGES-3PLUS appendix A).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the

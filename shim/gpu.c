@@ -656,7 +656,10 @@ static uint32_t hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords, uint32_t *
 		uint32_t d3 = rd(qdata(1) + 4 * ((r + 3) % QSIZE));
 		wr(qhdr(1) + 40, ((r + sz + 3) & ~3u) % QSIZE);
 		wr(GMU2HOST_INTR_CLR, 1);
-		if (mid == 126 && (d1 >> 20) == seq) {
+		/* this firmware (HFI 2.5) acks with type 1 and the command's own id; newer ones use id 126 */
+		uint32_t mtype = (h >> 16) & 0xf;
+		if ((mtype == 1 || mtype == 2 || mid == 126) && (d1 >> 20) == seq) {
+			(void)d3;
 			if (ack_payload0)
 				*ack_payload0 = d3;
 			con_hex2("HFI ack", "id/seq=", id << 16 | seq, "err/pl0=", (d2 & 0xffff) << 16 | (d3 & 0xffff));
@@ -683,6 +686,69 @@ static uint32_t arc_vote(const struct arc *pri, const struct arc *sec, uint32_t 
 	if (q < 0)
 		q = sec->n - 1;
 	return vlvl << 16 | (uint32_t)q << 8 | (uint32_t)p;
+}
+
+/* ---- probe 4 (in the gpu3 build): GPU_CC PLLs, OOB_GPU_SET -> GMU powers GX (A740-STAGES-3PLUS s4) ---- */
+
+static void pll_config(uintptr_t b, uint32_t l, uint32_t alpha)
+{
+	/* lucid ole: L 0x10 (l | cal 0x44 << 16 | 0x44 << 24), ALPHA 0x14, USER 0x18/0x1c, CONFIG 0x20/24/28,
+	 * TEST 0x2c/30/34/38; then MODE.OUTCTRL 0, OPMODE standby, MODE.RESET_N 1 (Linux clk_lucid_ole_pll_configure) */
+	wr(b + 0x10, l | 0x44u << 16 | 0x44u << 24);
+	wr(b + 0x14, alpha);
+	wr(b + 0x20, 0x20485699u);
+	wr(b + 0x24, 0x00182261u);
+	wr(b + 0x28, 0x82aa299cu);
+	wr(b + 0x18, 0);
+	wr(b + 0x1c, 5);
+	wr(b + 0x2c, 0);
+	wr(b + 0x30, 3);
+	wr(b + 0x34, 0x9000);
+	wr(b + 0x38, 0x34);
+	wr(b + 0x0, rd(b + 0x0) & ~1u);
+	wr(b + 0x4, 0);
+	wr(b + 0x0, rd(b + 0x0) | 4u);
+}
+
+static void gpu4_gx_on(void)
+{
+	con_hex2("P6 PLL0", "mode=", rd(GPUCC + 0x0), "l=", rd(GPUCC + 0x10));
+	con_hex2("P6 PLL1", "mode=", rd(GPUCC + 0x1000), "l=", rd(GPUCC + 0x1010));
+	if ((rd(GPUCC + 0x10) & 0xff) == 0) {
+		con_str("NEXT", "P6 pll config");
+		pll_config(GPUCC, 0x1e, 0xbaaa);
+		pll_config(GPUCC + 0x1000, 0x16, 0xeaaa);
+		con_hex2("P6 PLL l", "pll0=", rd(GPUCC + 0x10), "pll1=", rd(GPUCC + 0x1010));
+	}
+	wr(0x03d8ec40, 0);			/* AO_AHB_FENCE_CTRL: allow */
+	con_str("NEXT", "P6 OOB GPU set");
+	wr(GMU2HOST_INTR_CLR, 1u << 31);
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HOST2GMU_INTR_SET, 1u << 30);	/* OOB_GPU_SET */
+	uint32_t us = poll(GMU2HOST_INTR_INFO, 1u << 31, 1u << 31, 300000);
+	wr(GMU2HOST_INTR_CLR, 1u << 31);
+	con_hex2("P6 OOB", "ack us=", us, "info=", rd(GMU2HOST_INTR_INFO));
+	uint32_t gx_us = poll(0x03d7e340, 3, 0, 100000);	/* GFX_PWR_CLK_STATUS: GDSC on + clock on */
+	con_hex2("P6 GX", "pwrclk=", rd(0x03d7e340), "us=", gx_us);
+	con_hex2("P6 GX", "gdscr=", rd(GPUCC_GX_GDSCR), "rpmhst=", rd(0x03d7e3b0));
+	if (us == ~0u || gx_us == ~0u) {
+		con_hex2("P6 fail", "g0=", rd(0x03d7e714), "g1=", rd(0x03d7e718));
+		con_hex2("P6 fail", "fwbusy=", rd(0x03d7e068), "rscc=", rd(0x03d50010));
+		con_hex2("P6 fail", "seqbusy=", rd(0x03d50404), "logwp=", rd(0x03d7e738));
+		con_str("GPU4 RESULT", "GX did not come up");
+		return;
+	}
+	/* GX is on: first GX-domain reads (were the reset hazard with GX off) */
+	con_str("NEXT", "P7 first GX reads");
+	wr(0x03d0f114, 0);			/* CX GBIF_HALT */
+	wr(0x03d00058, 0);			/* RBBM_GBIF_HALT (GX) */
+	con_hex2("P7 RBBM", "status=", rd(0x03d00840), "int0=", rd(0x03d00804));
+	con_hex2("P7 RBBM", "gbifhalt=", rd(0x03d00058), "status3=", rd(0x03d0084c));
+	con_hex2("P7 CP", "status1=", rd(0x03d02094), "hwfault=", rd(0x03d02094 - 0x10));	/* CP_STATUS_1, CP_HW_FAULT 0x03d02084 */
+	con_hex2("P7 CP", "aon ctr=", rd(0x03d02600), "intstat=", rd(0x03d0208c));		/* CP_ALWAYS_ON_COUNTER, CP_INTERRUPT_STATUS */
+	con_str("GPU4 RESULT", "GX ON at 220 MHz (OOB held)");
+	/* drop the OOB: the GMU may collapse GX again; the M3 is put back in reset by the caller */
+	wr(HOST2GMU_INTR_SET, 1u << 31);
 }
 
 static void gpu3_hfi(void)
@@ -749,7 +815,9 @@ static void gpu3_hfi(void)
 
 	con_hex2("GPU3 gmu", "info=", rd(GMU2HOST_INTR_INFO), "rpmhst=", rd(0x03d7e3b0));
 	con_hex2("GPU3 gmu", "gxstat=", rd(0x03d7e340), "logwp=", rd(0x03d7e738));
-	con_str("GPU3 RESULT", ok ? "5 acks: HFI up" : "HFI failed");
+	con_str("GPU3 RESULT", ok ? "5 acks err 0: HFI up" : "HFI failed");
+	if (ok)
+		gpu4_gx_on();
 }
 
 /* RSC/PDC sequencer microcode, KGSL gen7_load_rsc_ucode / gen7_load_pdc_ucode (A740 values), between
