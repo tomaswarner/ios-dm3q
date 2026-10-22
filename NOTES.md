@@ -520,6 +520,14 @@
   after START; gfx vote 220 MHz = 0x00340201, cx 0x00400202/0x00800303; BW addrs cn0 0x50038 sh0 0x50004 mc0 0x50000
   acv 0x50068; GX pwrclk 3 (off, as expected). gpu4 = gpu3 build with the ack fix + GPU_CC PLL0/1 config if L=0 +
   OOB_GPU_SET + GFX_PWR_CLK_STATUS poll + first GX reads (RBBM_STATUS etc, addresses from STAGES-3PLUS appendix A).
+  **🎉🎉🎉 GX ON (gpu4, 2026-10-21 ~23:20, photo):** 5 HFI acks with err 0 (PERF 4, BW 3, CORE_FW_START 14, START 10,
+  PERF_VOTE 30 -> 220 MHz); GPU_CC PLL0 already running from ABL (MODE 0xE0000005, L 0x00440016) so no PLL config;
+  PLL1 unconfigured (L 0, not needed). OOB_GPU_SET acked in 167 us, GMU_GFX_PWR_CLK_STATUS 0 at once, GX GDSCR
+  0xF8222800 (PWR_ON), RPMh state 0. First GX reads without any fault: RBBM_STATUS 1, RBBM_INT_0 0, GBIF halt 0,
+  STATUS3 0, CP_STATUS_1 0, CP_HW_FAULT 0, CP_ALWAYS_ON_COUNTER ticking, CP_INTERRUPT_STATUS 0.
+  NEXT: probe 5 = GPU SMMU context for SIDs 0/1/2 (same CB code, unprivileged pages + HUPCF), GX register init
+  (STAGES-3PLUS s6), SQE (a740_sqe.fw from byte 4) + ring + CP_ME_INIT; then zap shader (required: sailfish saw
+  TRUST_CNTL write reset the phone and CP_SET_SECURE_MODE 0 without zap hang the CP) and CP_MEM_WRITE.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
