@@ -508,6 +508,13 @@
   FW_INIT_RESULT stays 0; CB FSR 0x408 (PF, AArch64), FAR 0x4000, FSYNR0 0x63 = privileged instruction fetch
   permission fault at the fw's first DDR instruction: pages were AP=01 (EL0-writable -> implicit PXN). gpu2b: AP=00
   (privileged RW, as IOMMU_PRIV). Review doc docs/dm3q/gpu/PROBE2-REVIEW.md (map() consecutive pages fix etc).
+  **🎉🎉 GMU BOOTS (gpu2b, 2026-10-21 ~23:10, photos):** with AP=00 pages: FW_INIT_RESULT 0x100 after 15 ms (GMU
+  on XO 19.2 MHz), CB FSR 0x400 (format only, no fault), RSC/PDC ucode loaded, HFI_CTRL_STATUS 1 immediately,
+  GENERAL_0 0x40000011, GMU log write pointer 4 (log w0 0x21 w1 0x0D60C296 w2 1). GPU2 RESULT smmu/init/hfi ooo.
+  Plan for the rest: docs/dm3q/gpu/A740-STAGES-3PLUS.md (probe 3 = HFI messages PERF_TABLE 4, BW_TABLE 3,
+  CORE_FW_START 14, START 10 + GX_BW_PERF_VOTE 30; probe 4 = GPU_CC PLLs + OOB GX up; probe 5 = GPU SMMU SID 0
+  + SQE + ring + ME_INIT; probe 6 = CP_MEM_WRITE). Prior art: github.com/joranv1/ios-sailfish (Adreno 530,
+  freedreno GL in backboardd; analysis in docs/dm3q/gpu/SAILFISH-LESSONS.md when the helper finishes).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
