@@ -70,3 +70,58 @@ surface's size must equal the texture's (987x1605 etc.). Caller must feed `chrom
 (not the top-level bytesPerRow 3968) in `IoSurfaceYCbCr`. Check SweetSurface / IOSurface plane base-address reporting returns the plane dict values, since the
 top-level fields from the kernel are wrong for this format. Shader-side alternative (no m2v change): sample plane0 as R8Unorm (.r -> G) and plane1 as RG8Unorm
 (.r -> B, .g -> R) and recombine as float4(p1.g, p0.r, p1.r, 1).
+
+## 6. Follow-up: what makes RenderBox pick 542, and how to make it pick BGRA8 instead
+Scratch: `.../scratchpad/rb4/RB.s` (RenderBox otool dump), `QuartzCore.s`. All addresses unslid DSC.
+
+### 6.1 The only chooser of 542 in RenderBox
+`RB::ColorMode::pixel_format(Device const*, uint flags, ColorSpace*, uint*) const` @ 0x1e68c944c (the `mov w10,#0x21e` is at 0x1e68c95e0;
+the other 0x21e site, 0x1e68c8828, is `pixel_format_from_four_cc`, a reader of existing '_RB4' surfaces). Registers: x0=ColorMode (byte0 = depth class,
+dword@4 = mode bits: b0 linear, b1 "5bpc", b2 "422", b3 "420"), x1=Device*, w2=flags. For depth class 0 (the normal 8-bit class):
+1. `flags & 0x1a` must equal 2 (0x1e68c9504..0x1e68c9518), else fallback.
+2. `Device* != NULL`, `flags & 1 == 0` (0x1e68c951c, 0x1e68c9520).
+3. **`Device+0x111 >= 3`** (`ldrb w10,[x1,#0x111]; cmp w10,#3; b.lo fallback` @ 0x1e68c9524..0x1e68c952c). THE gate.
+4. `flags & 4 == 0`, mode bits 3, 2, 1 clear (0x1e68c9530..0x1e68c95d4); then result = 542 (0x21e) if mode bit0 (linear) clear, else 523 (0x20b, YCBCR8_444_2P_sRGB;
+   also a 2-plane YCbCr format, equally unrenderable).
+Fallback (label 0x1e68c9588): `0x50` (80 = MTLPixelFormatBGRA8Unorm) if mode bit0 clear, `0x51` (81 = BGRA8Unorm_sRGB) if set.
+(Variants: `flags&0x1a == 8` goes to 0x1e68c9584 (0x2b or 0x73-class formats); irrelevant for the plain case.)
+Also `RB::color_depth_layer_format` (0x1e68c9608) uses `dev[0x111] > 2` to return 0x228/0x229 (552/553) else 0x73; the 8-bit path never returns 542 there.
+
+### 6.2 Where Device+0x111 comes from
+`RB::Device::Device(RBDevice*, id<MTLDevice>)` @ 0x1e6919170, loop at 0x1e6919630..0x1e6919654:
+```
+for (n = 0x3e9 (1001); n != 0x3f0 (1008); n++) {        // MTLGPUFamilyApple1 .. Apple7
+    if (![mtl_device supportsFamily:n]) break;          // 0x1e691963c  objc_msgSend supportsFamily:
+    dev[0x111] = n - 0x3e8;                             // 0x1e6919648 strb w8,[x27]
+}
+```
+So `dev[0x111]` = count of consecutive supported Apple families starting at 1001 (0 if Apple1 is NO). It is also stored in a few other places:
+`supportsFamily:0xbbb` (3003, Metal3) -> dev[0x113] (0x1e6919884). No private SPI, no defaults key, and no `pixelFormatCapabilities`/`supportsPixelFormat:` query is involved in the 542 choice.
+Uses of `dev[0x111]` other than the format: pipeline shader function constants at 0x1e691bd54..0x1e691bdec (booleans `level != 0`, `level > 2` x2, and the raw level number),
+buffer alignment (0x1e69196b8: `level == 0`), `level >= x` checks at 0x1e68ad29c, 0x1e68fa15c, 0x1e691b81c. UNVERIFIED consequence of dropping the level to 2: the two `level > 2` shader
+constants become false (RenderBox picks its non-Apple3+ shader variants), which should be functionally fine.
+
+### 6.3 Selector(s) to override
+- **`-[SweetMTLDevice supportsFamily:]` returning NO for `MTLGPUFamilyApple3` (1003)** (and, for consistency, any family > 1003, which RB never reaches anyway because it stops at the first NO).
+  With 1001 -> YES, 1002 -> YES, 1003 -> NO: `dev[0x111] = 2`, `ColorMode::pixel_format` takes the fallback and RenderBox creates its layers/IOSurfaces with BGRA8Unorm (80, or 81 for linear).
+  Since `create_iosurface` for 80 has fourcc 'BGRA', no '_RB4' appears and chronod's `renderCommandEncoder` colour attachment is a plain BGRA8 texture over the IOSurface.
+- Caveat: `supportsFamily:` is global; QuartzCore asks the same selector: `CA::OGL::MetalContext` init @ ~0x1884886d0..0x188488898 stores bits in ctx+0xa3c
+  (0x1: Apple1 1001; 0x2/0x10/0x200/0x400: 1002; 0x100: 1003; 0x80: 1005; 0x20: private `-supportsYCBCRFormats12`; 0x40: private `-supportsYCBCRPackedFormats12`;
+  0x4 and 0x8: set when 1001 YES, UNVERIFIED meaning). Answering NO for 1003 in backboardd would clear 0x100 (used only for 'b3a8' -> 550 mapping and some CA paths) — so scope the override to
+  the chronod process (check `getprogname()`/`_NSGetExecutablePath` in the SweetMTLDevice, or apply only when the caller image is RenderBox via `__builtin_return_address`).
+- QuartzCore's '_RB4' -> 542 mapping (`four_cc_to_mtl_format` @ 0x1882d69f4, called with ctx+0xa3c as the 2nd arg, e.g. @ 0x18830af6c) needs ctx bit **0x4**, which is set whenever `supportsFamily:1001`
+  is YES (0x1884887b4..0x1884887c8, UNVERIFIED mapping of bit 4 to a family). It can only be disabled by answering NO for Apple1, which would break everything; DO NOT. It does not matter: once chronod
+  produces BGRA surfaces, CA never sees '_RB4'. (Without bit 4 CA would return format 0 for '_RB4', i.e. no texture.)
+- `-[MTLDevice supportsYCBCRFormats12]` (bit 0x20) is NOT read by RenderBox for this choice; it only gates CA's own 2-plane YCbCr/RGB mapping (the 4:2:0 families) and is unrelated.
+
+### 6.4 Alternative / belt-and-braces knobs (UNVERIFIED that they take effect in chronod)
+- Environment `RB_COLOR_MODE` is parsed by `RB::ColorMode(RBColorMode)` lambda @ 0x1e68c91b8 (tokens separated by `-,; `: `deep`, `wide`, `extended`, `fixed`, `linear`, `nonlinear`, `5bpc`, `422`, `420`).
+  Tokens `5bpc`/`422`/`420` set mode bits 1/2/3 and would make `pixel_format` skip 542 (bit 1 -> 0x28 = B5G6R5Unorm or 0x80000003, bit 2 -> 0x20a/0x1f6 YCbCr formats, bit 3 -> 0x208/0x1f4), but these
+  select other 2-plane or 16-bit formats, so none is a clean BGRA8. `linear` alone gives 523 (still 2-plane). NOT recommended.
+- `RB_DISABLE_WORKAROUNDS` (`RB::disable_workarounds` called at 0x1e68b4668) only sets flag bit 1 in `create_iosurface` for negative-format callers; irrelevant.
+- No NSUserDefaults key or `os_feature` check was found in the chooser (the only external inputs are `supportsFamily:` via Device+0x111, flags from the caller and mode bits).
+
+### 6.5 Answer
+Override `-[SweetMTLDevice supportsFamily:]`: return NO for 1003 (`MTLGPUFamilyApple3`), YES for 1001 and 1002, and NO for 1004+, only for the chronod process (or for calls originating in RenderBox).
+RenderBox then picks `MTLPixelFormatBGRA8Unorm` (80), or BGRA8Unorm_sRGB (81) if its ColorMode is linear.
+Check for a regression in the chronod-side shader variants (function constants at 0x1e691bd78/9c now false). Also confirm after the change that SWEET SURF logs show 'BGRA' not '_RB4'.
