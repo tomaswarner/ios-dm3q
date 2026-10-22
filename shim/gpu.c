@@ -486,8 +486,28 @@ void gpu_probe(void)
 #define CB_TLBSTATUS	0x7f4
 
 #define GMU_SID		5
-#define CARVE		0x900000000UL	/* free while no xnu runs: upper DDR bank */
+/* DDR bank 0x8_c0000000-0xa_00000000; xnu's RAM ends at 0x9_bcc00000 (tools/mkadt.py HIGH_*), so 0x9_c0000000
+ * stays ours for good: 1 MiB used here (tables, firmware, ring), then the handoff page, then a pool for xnu's
+ * GPU driver (page tables, buffers) up to GPU_RESERVE_END. */
+#define CARVE		0x9c0000000UL
 #define CARVE_SIZE	0x100000UL	/* 1 MiB: tables + firmware + regions */
+#define HANDOFF		(CARVE + CARVE_SIZE)
+#define GPU_POOL	(CARVE + 0x200000UL)
+#define GPU_RESERVE_END	0xa00000000UL
+
+#if defined(DIAG_GPUBOOT)
+#define GPU_STAGES	1	/* run every stage (2..6) and leave the GPU running for xnu */
+#endif
+#if defined(DIAG_GPU3) || defined(DIAG_GPU5) || defined(DIAG_GPU6) || defined(GPU_STAGES)
+#define RUN_HFI		1
+#endif
+#if defined(DIAG_GPU5) || defined(DIAG_GPU6) || defined(GPU_STAGES)
+#define RUN_CP		1
+#endif
+#if defined(DIAG_GPU6) || defined(GPU_STAGES)
+#define RUN_ZAP		1
+#endif
+static int gpu_up;		/* CP running, non-secure, handoff written: keep GMU, OOB and GX up */
 
 /* GMU VAs (firmware PREALLOC requests + log + HFI) */
 #define VA_CODE		0x00004000UL
@@ -776,6 +796,42 @@ static int ring_submit(uint64_t ring, uint32_t *wptr, const uint32_t *cmds, uint
 #define ZAP_REGION	0x9b09a000UL
 #define ZAP_META	(CARVE + 0xc0000UL)	/* 4 KiB aligned, contiguous, uncached (MMU off), not reused after */
 
+static uint64_t g_ring, g_mem, g_test;
+
+/* Handoff page for xnu's GPU driver (bsd/dev/sweet_gpu.c reads it; layout = struct sweet_gpu_handoff there).
+ * All u64. The CP is idle with rptr == wptr; GPU page table = 4 KiB granule, T0SZ 25 (39-bit VA), 3 levels
+ * from l1, MAIR0 attr0 = 0x44 (normal NC), data pages AP=01 (bit 6), privileged-fetch pages AP=00. */
+static void handoff_write(uint32_t wptr, uintptr_t cbp)
+{
+	static const uint64_t v[] = {
+		0x3034374155504753ULL,	/*  0 magic "SGPUA740" */
+		1,			/*  1 version */
+		0, 0, 0, 0,		/*  2-5 filled below: cb page, l1, carve_next, wptr */
+		SMMU,			/*  6 kgsl-smmu base */
+		0,			/*  7 context bank (GPU SIDs 0 and 1) */
+		CARVE, CARVE_SIZE,	/*  8-9 shim region */
+		GPU_POOL, GPU_RESERVE_END - GPU_POOL,	/* 10-11 free pool for xnu */
+		0, VA_RING, 0x8000,	/* 12-14 ring pa (below), gpu va, size (dwords mod 8192) */
+		0, VA_MEMPTRS,		/* 15-16 memptrs pa (below), gpu va: +0 rptr shadow, +4 fence, +8 bv rptr */
+		VA_SQE, 0x13000,	/* 17-18 sqe gpu va, size */
+		0, VA_TEST,		/* 19-20 scratch test page pa (below), gpu va */
+		0x10021000ULL,		/* 21 first gpu va not used by the shim */
+		0x03d00000ULL, 0x40000,	/* 22-23 GPU register block (kgsl_3d0_reg_memory) */
+	};
+	for (uint32_t i = 0; i < sizeof(v) / 8; i++)
+		wr64(HANDOFF + 8 * i, v[i]);
+	wr64(HANDOFF + 8 * 2, cbp);
+	wr64(HANDOFF + 8 * 3, l1);
+	wr64(HANDOFF + 8 * 4, carve_next);
+	wr64(HANDOFF + 8 * 5, wptr);
+	wr64(HANDOFF + 8 * 12, g_ring);
+	wr64(HANDOFF + 8 * 15, g_mem);
+	wr64(HANDOFF + 8 * 19, g_test);
+	__asm__ volatile("dsb sy" ::: "memory");
+	gpu_up = 1;
+	con_hex2("HANDOFF", "pa lo=", (uint32_t)HANDOFF, "l1 lo=", (uint32_t)l1);
+}
+
 static void gpu6_zap(uint64_t ring, uint32_t *wptr, uint64_t test, uintptr_t cbp)
 {
 	con_clear(0xff006060U);		/* page 6: teal */
@@ -847,8 +903,10 @@ static void gpu6_zap(uint64_t ring, uint32_t *wptr, uint64_t test, uintptr_t cbp
 	static const uint32_t again[6] = { 0x703d8003, (uint32_t)VA_TEST + 4, 0, 0x600df00du, 0x70928000, 0x70268000 };
 	ms = ring_submit(ring, wptr, again, 6, cbp);
 	con_hex2("Z6 write", "ms=", (uint32_t)ms, "test+4=", rd(test + 4));
-	con_str("GPU6 RESULT", rd(test + 4) == 0x600df00du && rd(0x03d3d000) == 0 ? "ZAP OK: GPU non-secure, writes work"
-										 : "zap ran: check secvid/test");
+	int zok = rd(test + 4) == 0x600df00du && rd(0x03d3d000) == 0;
+	con_str("GPU6 RESULT", zok ? "ZAP OK: GPU non-secure, writes work" : "zap ran: check secvid/test");
+	if (zok)
+		handoff_write(*wptr, cbp);
 }
 
 static void gpu5_cp(void)
@@ -867,6 +925,9 @@ static void gpu5_cp(void)
 	uint64_t sqe = map(VA_SQE, 0x13000);
 	map_ap = 1u << 6;
 	uint64_t test = map(VA_TEST, 0x1000);
+	g_ring = ring;
+	g_mem = mem;
+	g_test = test;
 	(void)pwr;	/* power-up reglist left empty (fallback A): no preemption/IFPC here */
 	uint32_t sqe_bytes = (uint32_t)(_sqe_fw_end - _sqe_fw_start);
 	copy_words(sqe, _sqe_fw_start + 4, sqe_bytes - 4);	/* the microcode starts after the 4-byte header */
@@ -987,7 +1048,7 @@ static void gpu5_cp(void)
 				  : "CP did not execute the test");
 	if (!memok)
 		cp_dump("after test", c);
-#if defined(DIAG_GPU6)
+#if defined(RUN_ZAP)
 	if (ok && memok)
 		gpu6_zap(ring, &wptr, test, c);
 #endif
@@ -1030,11 +1091,13 @@ static void gpu4_gx_on(void)
 	con_hex2("P7 CP", "status1=", rd(0x03d02094), "hwfault=", rd(0x03d02094 - 0x10));	/* CP_STATUS_1, CP_HW_FAULT 0x03d02084 */
 	con_hex2("P7 CP", "aon ctr=", rd(0x03d02600), "intstat=", rd(0x03d0208c));		/* CP_ALWAYS_ON_COUNTER, CP_INTERRUPT_STATUS */
 	con_str("GPU4 RESULT", "GX ON at 220 MHz (OOB held)");
-#if defined(DIAG_GPU5) || defined(DIAG_GPU6)
+#if defined(RUN_CP)
 	gpu5_cp();
 #endif
-	/* drop the OOB: the GMU may collapse GX again; the M3 is put back in reset by the caller */
-	wr(HOST2GMU_INTR_SET, 1u << 31);
+	/* drop the OOB: the GMU may collapse GX again; the M3 is put back in reset by the caller.
+	 * Not when the GPU is handed to xnu: the OOB stays held so GX stays powered. */
+	if (!gpu_up)
+		wr(HOST2GMU_INTR_SET, 1u << 31);
 }
 
 static void gpu3_hfi(void)
@@ -1260,8 +1323,10 @@ void gpu2_probe(void)
 	/* page 3 (the console clips at the bottom) */
 	{
 		uint32_t sctlr = rd(c + CB_SCTLR), smr = rd(SMMU + SMMU_SMR(slot));
+#if !defined(GPU_STAGES)
 		con_str("PHOTO", "page 2 now: page 3 in 10 s");
 		udelay(10000000);
+#endif
 		con_clear(0xff004000U);
 		con_str("GPU2 page 3", "GMU boot (page 2: smmu)");
 		con_hex2("P2 summary", "cb/slot=", cb << 16 | slot, "sctlr=", sctlr);
@@ -1326,11 +1391,12 @@ void gpu2_probe(void)
 		uint32_t us = poll(0x03d7e600, 1, 1, 50000);
 		con_hex2("P5 HFI", "status=", rd(0x03d7e600), "us=", us);
 		results[0] = us != ~0u ? 'o' : 'X';
-#if defined(DIAG_GPU3) || defined(DIAG_GPU5) || defined(DIAG_GPU6)
+#if defined(RUN_HFI)
 		if (us != ~0u) {
 			hfi_pa = hfi;
 			gpu3_hfi();
-			wr(0x03d7e000, 1);	/* stop the M3 */
+			if (!gpu_up)
+				wr(0x03d7e000, 1);	/* stop the M3 (kept running when handed to xnu) */
 			return;
 		}
 #endif
@@ -1347,4 +1413,14 @@ void gpu2_probe(void)
 	line[16] = results[0];
 	line[17] = 0;
 	con_str("GPU2 RESULT", line);
+}
+
+/* Normal boot (DIAG=gpuboot with an xnu payload): the full bring-up of probes 2-6, GPU left running for xnu.
+ * Returns 1 when the handoff page is valid. */
+int gpu_boot(void)
+{
+	wr64(HANDOFF, 0);		/* no stale handoff from an earlier boot */
+	__asm__ volatile("dsb sy" ::: "memory");
+	gpu2_probe();
+	return gpu_up;
 }

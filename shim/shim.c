@@ -415,6 +415,9 @@ void shim_main(uint64_t dtb)
 		test_ufs_linux();
 		touch_preboot();	/* QUP1 core clock vote + STM touch rails, for xnu's sweet_stm */
 		perf_preboot();		/* CPU clusters + DDR/LLCC: xnu has no DCVS for them */
+#if defined(DIAG_GPUBOOT)
+		gpu_boot();		/* Adreno 740 up (GMU, HFI, GX, CP, zap), handed to xnu's sweet_gpu */
+#endif
 		con_str("PERF", "booting iOS in 6 s (photo)");
 		for (volatile unsigned long i = 0; i < 1; i++) {
 			uint64_t t0, t;
