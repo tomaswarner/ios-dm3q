@@ -567,6 +567,13 @@
   running (GMU up, OOB held). GPU region 0x9c0000000-0xa00000000 is DDR above xnu's RAM (mkadt HIGH_*).
   xnu 0111 (bsd/dev/sweet_gpu.c): takes the CP over from the handoff, 7 CP_MEM_WRITE+fence pings over 60 s, logs
   "SWEET GPU". Patch generated against the CI 012 buildtree (gh run download -R tomaswarner/ios-dm3q -n xnu-buildtree).
+  **🎉 xnu DRIVES THE A740 (boot x24g = gpuboot shim + payload x23s/kernel 013, loggrep photo 2026-10-21):**
+  "SWEET GPU: handoff ok: l1 9c006f000, ring 9c0072000 (va 10000000), pool 9c0200000 +3fe MiB"; state gmu init 100,
+  rbbm 1, rptr 1f = wptr 1f = handoff, secvid 0; 7/7 CP_MEM_WRITE+CACHE_CLEAN fence pings from xnu over 60 s while
+  iOS boots to the lock screen: each 10 us, fence 101..107, rbbm 1, fault 0. GPU stable under iOS.
+  NEXT (B2): /dev/kgsl-3d0 cdev (KGSL-XNU-DESIGN.md + TURNIP-IOS.md 4): BOs from the 0x9c0200000 pool (contiguous,
+  outside the VM) mapped into the GPU table at l1 and into the task; GETPROPERTY, DRAWCTXT, GPUMEM_ALLOC_ID/FREE_ID,
+  GPU_COMMAND (IBs via CP_INDIRECT_BUFFER on this ring + per-context timestamp), READ/WAITTIMESTAMP.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
