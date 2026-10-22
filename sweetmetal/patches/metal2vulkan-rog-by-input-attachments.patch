@@ -1,0 +1,32 @@
+diff --git a/crates/metal2vulkan/src/lower/fragment/mod.rs b/crates/metal2vulkan/src/lower/fragment/mod.rs
+index 67bdbfb..ab0c2d1 100644
+--- a/crates/metal2vulkan/src/lower/fragment/mod.rs
++++ b/crates/metal2vulkan/src/lower/fragment/mod.rs
+@@ -342,12 +342,21 @@ pub fn finish(cx: &mut SelectCx<'_>, m: &mut Meter) -> Result<(), Error> {
+     // raster order group.
+     let shadow = cx.families.fragment.stencil.is_some();
+     let storage = !cx.families.fragment.fetch.is_empty() || shadow;
+-    let interlock =
+-        if rog::declared(cx.entry) || cx.families.fragment.imageblock.is_some() || storage {
+-            Some(rog::mode(cx)?)
+-        } else {
+-            None
+-        };
++    // A function that only names a raster order group, with no imageblock and no storage form,
++    // on a device without the pixel interlock but with rasterization-order color attachment
++    // access (Turnip): its framebuffer reads are input attachments, which that access already
++    // orders between overlapping fragments, so it runs without a critical section. Device memory
++    // it writes in the group is then unordered (local patch for the DM3Q port: CoreAnimation's
++    // inplace_copy pipelines).
++    let f = cx.profile.fields().fragment;
++    let rog_by_inputs = !f.pixel_interlock && !f.sample_interlock && f.rasterization_order_color_access;
++    let interlock = if cx.families.fragment.imageblock.is_some() || storage {
++        Some(rog::mode(cx)?)
++    } else if rog::declared(cx.entry) && !rog_by_inputs {
++        Some(rog::mode(cx)?)
++    } else {
++        None
++    };
+     let snapshot = snapshot::finish(cx, interlock.is_some(), looped)?;
+     let sites: Vec<InstId> = cx.families.fragment.discards.keys().copied().collect();
+     let discard::DiscardPlan {

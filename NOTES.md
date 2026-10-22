@@ -613,6 +613,14 @@
   surface (IOSurface-style host memory, 64/64 texels, deallocator ran), depth: SWEETMETAL OK on the Adreno 740.
   Local relink: tools/xnu-relink.sh KIT OUT NEW.o.. (CI link kit + relink/ from xnu.yml after commit 8b...; links with
   Xcode 27's ld, only libfirehose_kernel.a was missing).
+  **🎉🎉🎉 iOS LOCK SCREEN RENDERED BY THE ADRENO 740 (2026-10-22 ~11:05, user: "funciona el lockscreen"):**
+  /var/tmp/sweet_vk_turnip ON + sm_kill backboardd SpringBoard: both run SweetMetal on "Turnip Adreno (TM) 740",
+  7 commits/10 s, mean latency 10 ms. First try crashed backboardd: CA's std_vert1_lph/inplace_copy_lph names
+  raster order groups -> needs fragmentShaderPixelInterlock (Turnip lacks). metal2vulkan local patch
+  (lower/fragment/mod.rs): ROG-only functions run without a critical section when the device orders input
+  attachments (rasterizationOrderColorAttachmentAccess, Turnip has it). Open: some newBufferWithBytesNoCopy
+  imports refused (KGSL_IOS_IMPORT failure; read-only or device-pager memory?), SpringBoard asks newHeapWithDescriptor.
+  NOTE: the flag file persists across reboots (UI on Turnip at boot); remove with `sm_touch /var/tmp/sweet_vk_turnip 0`.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
