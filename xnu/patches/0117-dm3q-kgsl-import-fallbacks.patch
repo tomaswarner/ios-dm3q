@@ -1,0 +1,59 @@
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+index 8a90dc5..1be9aac 100644
+--- a/bsd/dev/sweet_kgsl.c
++++ b/bsd/dev/sweet_kgsl.c
+@@ -206,6 +206,7 @@ struct kbo {
+ 	uint64_t pa, size;              /* host: pa unused */
+ 	uint64_t uaddr, gva;            /* host: the caller's range and its GPU VA */
+ 	vm_map_t map;                   /* host: the wired map (referenced) */
++	bool wired;                     /* host: we wired the range (else it was already resident: device memory) */
+ 	memory_object_t pager;
+ 	ipc_port_t entry;
+ };
+@@ -404,7 +405,9 @@ bo_release(struct kbo *b)
+ {
+ 	if (b->host) {
+ 		host_unmap(b, b->size);
+-		(void)vm_map_unwire(b->map, (vm_map_offset_t)b->uaddr, (vm_map_offset_t)(b->uaddr + b->size), TRUE);
++		if (b->wired) {
++			(void)vm_map_unwire(b->map, (vm_map_offset_t)b->uaddr, (vm_map_offset_t)(b->uaddr + b->size), TRUE);
++		}
+ 		vm_map_deallocate(b->map);
+ 		bzero(b, sizeof(*b));
+ 		return;
+@@ -518,16 +521,20 @@ bo_import(int owner, struct kgsl_ios_import *im)
+ 	b->gva = HOST_GPUVA + (uint64_t)slot * 0x4000;
+ 	b->map = current_map();
+ 	vm_map_reference(b->map);
+-	kern_return_t kr = vm_map_wire_kernel(b->map, (vm_map_offset_t)im->addr, (vm_map_offset_t)(im->addr + im->size),
+-	    VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_IOKIT, TRUE);
++	/* read-write, else read-only (shared or const memory: the GPU only reads it), else take the pages
++	 * as they are when every one is resident (memory a driver keeps wired, e.g. a kernel IOSurface) */
++	vm_map_offset_t s0 = (vm_map_offset_t)im->addr, e0 = (vm_map_offset_t)(im->addr + im->size);
++	kern_return_t kr = vm_map_wire_kernel(b->map, s0, e0, VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_IOKIT, TRUE);
++	kern_return_t kr_ro = KERN_SUCCESS;
+ 	if (kr != KERN_SUCCESS) {
+-		host_unmap(b, 0);
+-		vm_map_deallocate(b->map);
+-		bzero(b, sizeof(*b));
+-		lck_mtx_unlock(&kgsl_mtx);
+-		return kr == KERN_INVALID_ADDRESS ? EFAULT : ENOMEM;
++		kr_ro = vm_map_wire_kernel(b->map, s0, e0, VM_PROT_READ, VM_KERN_MEMORY_IOKIT, TRUE);
+ 	}
++	b->wired = kr == KERN_SUCCESS || kr_ro == KERN_SUCCESS;
+ 	pmap_t pm = get_task_pmap(current_task());
++	if (!b->wired) {
++		printf("SWEET KGSL: import %llx +%llx: wire rw %d ro %d, using resident pages\n", im->addr, im->size, kr,
++		    kr_ro);
++	}
+ 	uint64_t o;
+ 	for (o = 0; o < im->size; o += 0x1000) {
+ 		uint64_t va = im->addr + o;
+@@ -537,6 +544,7 @@ bo_import(int owner, struct kgsl_ios_import *im)
+ 		}
+ 	}
+ 	if (o < im->size) {
++		printf("SWEET KGSL: import %llx +%llx: page at +%llx not resident\n", im->addr, im->size, o);
+ 		bo_release(b);          /* unmaps what was mapped (all slots), unwires */
+ 		lck_mtx_unlock(&kgsl_mtx);
+ 		return EFAULT;
