@@ -595,6 +595,11 @@
   016), cable in, wait for 192.168.7.2, `tools/sweetrun.py -f tools/kgsl-test/libvulkan_freedreno.dylib -f
   tools/kgsl-test/vk_test vk_test` (signed copies there, not in git). If still stuck: read IB1/IB2 base vs Turnip's
   BOs, consider FD_RD_DUMP cmdstream dump + cffdump, drawctxt switch / preamble IBs, BV thread / concurrent binning.
+  **🎉🎉 FIRST VULKAN ON THE ADRENO 740 (boot x27g = kernel 016 / xnu 0114, vk_test via sweetrun, 2026-10-22):**
+  with the KGSL gen7 submit wrapping (THREAD_CONTROL BOTH/BR, IFPC + IB1LIST markers, CCU invalidates) Turnip's
+  submits retire: vkCmdFillBuffer filled 1 MiB with a740a740 (0 wrong words), vkCmdUpdateBuffer wrote its 16 bytes,
+  submit -> fence 1.71 ms. VULKAN TEST PASSED. (0113 without the wrapping: the first Turnip submit never retired.)
+  NEXT: render pass test (clear + triangle into an image, read back), then SweetMetal: metal2vulkan on Turnip.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
