@@ -298,6 +298,17 @@ static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
 		bpr = IOSurfaceGetBytesPerRow(s);
 		offset = 0;
 	}
+	/* RenderBox's '_RB4' (RGB8_444_2P: plane 0 one byte a texel, plane 1 two, both full size, rows
+	 * rounded up to 64 bytes, plane 1 right after plane 0; docs/dm3q/RB4-FORMAT.md): the kernel's
+	 * plane facts do not reach IOSurface.framework (bytes per row 0, a wrong plane 1 offset), so
+	 * they are rebuilt here from the width and height. */
+	bool rb4 = planes == 2 && IOSurfaceGetPixelFormat(s) == 0x5f524234u;
+	uint64_t rb4_bpr0 = (IOSurfaceGetWidth(s) + 63) & ~63ull, rb4_bpr1 = (IOSurfaceGetWidth(s) * 2 + 63) & ~63ull;
+	uint64_t rb4_off1 = rb4_bpr0 * IOSurfaceGetHeight(s);
+	if (rb4) {
+		offset = plane ? rb4_off1 : 0;
+		bpr = plane ? rb4_bpr1 : rb4_bpr0;
+	}
 	size_t page = (size_t)getpagesize();
 	uint64_t len = (IOSurfaceGetAllocSize(s) + page - 1) & ~(uint64_t)(page - 1);
 	CFRetain(s);
@@ -322,7 +333,8 @@ static NSString *render_key(SweetMTLDevice *dev, MTLRenderPipelineDescriptor *d)
 	if (planes > 1 && td.pixel_format == (uint32_t)d.pixelFormat) {
 		sm_surface_facts facts = {
 			IOSurfaceGetPixelFormat(s), plane, IOSurfaceGetWidth(s), IOSurfaceGetHeight(s),
-			(uint64_t)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 1) - base), IOSurfaceGetBytesPerRowOfPlane(s, 1),
+			rb4 ? rb4_off1 : (uint64_t)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 1) - base),
+			rb4 ? rb4_bpr1 : IOSurfaceGetBytesPerRowOfPlane(s, 1),
 		};
 		t = sm_texture_new_iosurface_facts(b, &td, offset, bpr, YES, &facts);
 	} else {

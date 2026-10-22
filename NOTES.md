@@ -621,6 +621,22 @@
   attachments (rasterizationOrderColorAttachmentAccess, Turnip has it). Open: some newBufferWithBytesNoCopy
   imports refused (KGSL_IOS_IMPORT failure; read-only or device-pager memory?), SpringBoard asks newHeapWithDescriptor.
   NOTE: the flag file persists across reboots (UI on Turnip at boot); remove with `sm_touch /var/tmp/sweet_vk_turnip 0`.
+  **2026-10-22 midday: GPU UI work (all on the phone, mostly without flashing):**
+  - Local kernel builds: Xcode 15.0.1 in `../xcode/Xcode_15.0.1.app` (user downloaded); `tools/xnu-cc.py` with
+    Xcode 15 clang compiles changed files, `tools/xnu-relink.sh KIT OUT objs..` relinks from a CI link kit
+    (xnu/out-dm3q-019) in seconds; layout identical to CI after dropping -rename_segment,__LASTDATA_CONST,__LAST.
+    Kernels out-local-0119..0122 booted.
+  - Autonomy tools: `tools/sm_shot.py OUT.png [scale]` (screenshot over USB), `sm_input tap|swipe|hold|key`
+    (xnu 0122 kern.sweet_input -> SweetHID), `sm_surf`, `kgsl_free` (free GPU pool). Reboot-to-Download research:
+    docs/dm3q/REBOOT-DOWNLOAD.md (SDAM 0x7148 <- 0x2A via SPMI write path still to build; SPMI bases to reconcile).
+  - Fixes: 0116 big submits (>64 IBs: device lost), 0117 import fallbacks, 0118 present tables + timing
+    (CPU present 23-28 ms/frame), 0119 KGSL context switch, 0120 present at SwapEnd, 0121 GPU pool ~2 GiB
+    (xnu 3 GiB: ADT dram-size 0xc0000000, shim CARVE 0x980000000), metal2vulkan 16 MiB blocks, Turnip: host
+    imports not counted in its heap (the "out of Device memory" that abandoned encoders = missing/clipped UI),
+    metal2vulkan `_RB4` (RenderBox RGB8_444_2P, docs/dm3q/RB4-FORMAT.md) + SweetMetal rebuilds its plane facts.
+  - State (boot x33g, Turnip flag on): UI on the Adreno, smoother than lavapipe; lock screen clock/date/camera OK;
+    widgets drawn (shapes) but content black; wallpaper black; a black rectangle glitch during some transitions;
+    kernel IOSurface plane facts do not reach IOSurface.framework (bpr 0, wrong plane offsets): fix in 0046 code.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
