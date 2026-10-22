@@ -1,0 +1,68 @@
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+index 1be9aac..3328404 100644
+--- a/bsd/dev/sweet_kgsl.c
++++ b/bsd/dev/sweet_kgsl.c
+@@ -195,6 +195,10 @@ _Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
+ #define CP_THREAD_CONTROL       0x17
+ #define THREAD_BR               1u              /* CP_SET_THREAD_BR */
+ #define THREAD_BOTH             3u              /* CP_SET_THREAD_BOTH */
++#define CP_RESET_CONTEXT_STATE  0x1f
++#define CP_SYNC_THREADS         (1u << 31)
++#define EV_LRZ_CACHE_FLUSH      0x26u
++#define EV_CACHE_CLEAN          0x31u
+ #define EV_CCU_INVALIDATE_DEPTH 24u
+ #define EV_CCU_INVALIDATE_COLOR 25u
+ #define EV_CACHE_CLEAN_TS       0x08000031u     /* CACHE_CLEAN | timestamp (0111 pings) */
+@@ -230,6 +234,7 @@ static struct {
+ 	bool open[MAX_OPEN];
+ 	struct kbo bo[MAX_BO];
+ 	struct kctx ctx[MAX_CTX];
++	uint32_t last_ctx;              /* context of the last submit on the ring (0: none) */
+ } k;
+ 
+ static LCK_GRP_DECLARE(kgsl_grp, "sweet_kgsl");
+@@ -657,7 +662,7 @@ gpu_command(int owner, struct kgsl_gpu_command *cmd)
+ 		printf("SWEET KGSL: GPU_COMMAND refused: %u IBs, cmdsize %u\n", cmd->numcmds, cmd->cmdsize);
+ 		return EINVAL;
+ 	}
+-	size_t bytes = (4u * (size_t)cmd->numcmds + 48u) * 4u;
++	size_t bytes = (4u * (size_t)cmd->numcmds + 64u) * 4u;
+ 	uint32_t *pkt = (uint32_t *)kalloc_data(bytes, Z_WAITOK);
+ 	if (!pkt) {
+ 		return ENOMEM;
+@@ -675,6 +680,13 @@ gpu_command_build(int owner, struct kgsl_gpu_command *cmd, uint32_t *pkt)
+ {
+ 	uint32_t n = 0;
+ 	struct kgsl_command_object obj;
++	/* another context than the last submit's: KGSL gen7_rb_context_switch (minus the pagetable
++	 * switch, one GPU address space here): sync both threads, reset the CP's per-context state
++	 * (on-chip and local timestamps, BV/BR counters, resource table), LRZ flush, cache clean.
++	 * Without it one process's leftover CP state shows up in the next one's frames. k.last_ctx
++	 * is read under kgsl_mtx below: the 10 words are reserved here and filled there. */
++	uint32_t sw = n;
++	n += 10;
+ 	pkt[n++] = PKT7(CP_THREAD_CONTROL, 1);
+ 	pkt[n++] = THREAD_BOTH;
+ 	pkt[n++] = PKT7(CP_SET_MARKER, 1);
+@@ -713,6 +725,21 @@ gpu_command_build(int owner, struct kgsl_gpu_command *cmd, uint32_t *pkt)
+ 		return EINVAL;
+ 	}
+ 	uint32_t ts = ++c->ts;
++	if (k.last_ctx != cmd->context_id) {
++		pkt[sw + 0] = PKT7(CP_THREAD_CONTROL, 1);
++		pkt[sw + 1] = CP_SYNC_THREADS | THREAD_BOTH;
++		pkt[sw + 2] = PKT7(CP_RESET_CONTEXT_STATE, 1);
++		pkt[sw + 3] = 0xfu;                     /* GLOBAL_LOCAL_TS | BV_BR_COUNTER | RESOURCE_TABLE | ON_CHIP_TS */
++		pkt[sw + 4] = PKT7(CP_EVENT_WRITE, 1);
++		pkt[sw + 5] = EV_LRZ_CACHE_FLUSH;
++		pkt[sw + 6] = PKT7(CP_EVENT_WRITE, 1);
++		pkt[sw + 7] = EV_CACHE_CLEAN;
++		pkt[sw + 8] = PKT7(CP_THREAD_CONTROL, 1);
++		pkt[sw + 9] = CP_SYNC_THREADS | THREAD_BR;
++		k.last_ctx = cmd->context_id;
++	} else {
++		pkt[sw + 0] = PKT7(CP_NOP, 9);          /* skips the 9 words after it */
++	}
+ 	uint64_t ms = POOL_GPUVA + MEMSTORE_OFF + 16ull * (cmd->context_id - 1);
+ 	pkt[n++] = PKT7(CP_EVENT_WRITE, 4);
+ 	pkt[n++] = EV_CACHE_CLEAN_TS;
