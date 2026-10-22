@@ -574,6 +574,15 @@
   NEXT (B2): /dev/kgsl-3d0 cdev (KGSL-XNU-DESIGN.md + TURNIP-IOS.md 4): BOs from the 0x9c0200000 pool (contiguous,
   outside the VM) mapped into the GPU table at l1 and into the task; GETPROPERTY, DRAWCTXT, GPUMEM_ALLOC_ID/FREE_ID,
   GPU_COMMAND (IBs via CP_INDIRECT_BUFFER on this ring + per-context timestamp), READ/WAITTIMESTAMP.
+  **xnu 0112 (/dev/kgsl-3d0) PANIC on the first BO alloc (x25g photo):** vm_map_delete "Attempting to remove permanent
+  VM map entry": ml_io_map* use io_submap (8 MiB, KMA_PERMANENT); ml_io_unmap after zeroing a BO panics. 0113: every
+  sweet_gpu/sweet_kgsl mapping via ml_io_map_unmappable (kernel_map, KMA_DATA) - CI 39714774153, out-dm3q-015.
+  **🎉 /dev/kgsl-3d0 WORKS (boot x26g = gpuboot + payload x26s/kernel 015, kgsl_test via sweetrun, 2026-10-22):**
+  KGSL TEST PASSED 0 failures: DEVICE_INFO chip 43050a01, ctx, BOs at gpu 0x100200000.. mapped WC into the task
+  (device pager + KGSL_IOS_MAP), zeroed, CPU r/w, GPU_COMMAND IB with CP_MEM_WRITE -> c0ffee42 seen by the CPU,
+  WAIT/READTIMESTAMP, 1000 submit+wait round trips in 842 ms (1 ms polling waits: needs the CP interrupt later),
+  64 MiB BO, FREE_ID, DRAWCTXT_DESTROY. NEXT: Mesa Turnip kgsl backend -> KGSL_IOS_MAP instead of mmap, then
+  vulkaninfo / first triangle on the phone.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
