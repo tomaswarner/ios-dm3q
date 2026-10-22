@@ -28,7 +28,7 @@
  
 --- /dev/null
 +++ b/bsd/dev/sweet_thermal.c
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,232 @@
 +/*
 + * DM3Q (Galaxy S23 Ultra, SM8550) thermal guard: nothing else in this kernel
 + * manages temperature, and the shim (port/shim/perf.c) pins every CPU cluster
