@@ -438,3 +438,325 @@ void gpu_probe(void)
 	con_str("GPU1 RESULT", line);
 	con_hex("GPU1 failed", (uint32_t)failed);
 }
+
+/* ===================================================================================== *
+ * Probe 2 ("gpu2", DIAG=gpu2): kgsl-smmu stage-1 context for the GMU (stream 5), the
+ * firmware's DDR blocks in a carve-out of our own, GMU release, FW_INIT_RESULT and HFI.
+ * Design: docs/dm3q/gpu/A740-POWERON.md section 4 (P2.1-P2.3).
+ * ===================================================================================== */
+
+#define SMMU		0x03da0000UL	/* kgsl-smmu (qcom,qsmmu-v500, MMU-500) */
+#define SMMU_CR0	0x000
+#define SMMU_IDR0	0x020
+#define SMMU_IDR1	0x024
+#define SMMU_IDR2	0x028
+#define SMMU_IDR7	0x03c
+#define SMMU_GFSR	0x048
+#define SMMU_SMR(n)	(0x800 + 4 * (n))
+#define SMMU_S2CR(n)	(0xc00 + 4 * (n))
+#define GR1_CBAR(n)	(0x000 + 4 * (n))
+#define GR1_CBA2R(n)	(0x800 + 4 * (n))
+#define CB_SCTLR	0x000
+#define CB_ACTLR	0x004
+#define CB_TCR2		0x010
+#define CB_TTBR0	0x020
+#define CB_TCR		0x030
+#define CB_MAIR0	0x038
+#define CB_MAIR1	0x03c
+#define CB_FSR		0x058
+#define CB_FAR		0x060
+#define CB_FSYNR0	0x068
+#define CB_TLBIALL	0x618
+#define CB_TLBSYNC	0x7f0
+#define CB_TLBSTATUS	0x7f4
+
+#define GMU_SID		5
+#define CARVE		0x900000000UL	/* free while no xnu runs: upper DDR bank */
+#define CARVE_SIZE	0x100000UL	/* 1 MiB: tables + firmware + regions */
+
+/* GMU VAs (firmware PREALLOC requests + log + HFI) */
+#define VA_CODE		0x00004000UL
+#define VA_LOG		0x60100000UL
+#define VA_HFI		0x60180000UL
+#define LOG_SIZE	0x10000UL
+#define HFI_SIZE	0x4000UL
+
+static uintptr_t pgsz, cb_base, gr1;
+static uint64_t carve_next;
+static uint64_t l1, l2[2];
+
+static void wr64(uintptr_t a, uint64_t v)
+{
+	__asm__ volatile("str %0, [%1]" : : "r"(v), "r"(a) : "memory");
+}
+
+static uint64_t rd64(uintptr_t a)
+{
+	uint64_t v;
+	__asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(a) : "memory");
+	return v;
+}
+
+static uint64_t carve_page(void)
+{
+	uint64_t p = carve_next;
+	carve_next += 0x1000;
+	for (uint64_t o = 0; o < 0x1000; o += 8)
+		wr64(p + o, 0);
+	return p;
+}
+
+/* L3 table for va (4 KiB granule, 39-bit VA: L1 1 GiB, L2 2 MiB, L3 4 KiB) */
+static uint64_t l3_for(uint64_t va)
+{
+	unsigned i1 = (va >> 30) & 0x1ff, i2 = (va >> 21) & 0x1ff;
+	uint64_t t2 = l2[i1 & 1];
+	if (!t2) {
+		t2 = l2[i1 & 1] = carve_page();
+		wr64(l1 + 8 * i1, t2 | 3);
+	}
+	uint64_t d = rd64(t2 + 8 * i2);
+	if (!(d & 1)) {
+		d = carve_page() | 3;
+		wr64(t2 + 8 * i2, d);
+	}
+	return d & 0xfffffffff000ULL;
+}
+
+/* map [va, va+size) to fresh zeroed pages; returns the PA of the first page (pages are consecutive) */
+static uint64_t map(uint64_t va, uint64_t size)
+{
+	uint64_t pa0 = 0;
+	for (uint64_t o = 0; o < size; o += 0x1000) {
+		uint64_t pa = carve_page();
+		if (!o)
+			pa0 = pa;
+		uint64_t l3 = l3_for(va + o);
+		/* page: AF, inner shareable, AP 01 (RW any EL), AttrIndx 0 (MAIR0 attr0) */
+		wr64(l3 + 8 * (((va + o) >> 12) & 0x1ff), pa | (1u << 10) | (3u << 8) | (1u << 6) | 3);
+	}
+	return pa0;
+}
+
+static void copy_words(uint64_t dst, const uint8_t *src, uint32_t size)
+{
+	for (uint32_t o = 0; o + 4 <= size; o += 4)
+		wr(dst + o, src[o] | src[o + 1] << 8 | src[o + 2] << 16 | (uint32_t)src[o + 3] << 24);
+}
+
+static int smmu_survey(uint32_t *nsmr, uint32_t *ncb)
+{
+	con_str("NEXT", "P1 smmu read");
+	uint32_t cr0 = rd(SMMU + SMMU_CR0), idr0 = rd(SMMU + SMMU_IDR0), idr1 = rd(SMMU + SMMU_IDR1);
+	uint32_t idr2 = rd(SMMU + SMMU_IDR2);
+	con_hex2("P1 SMMU", "cr0=", cr0, "gfsr=", rd(SMMU + SMMU_GFSR));
+	con_hex2("P1 SMMU", "idr0=", idr0, "idr1=", idr1);
+	con_hex2("P1 SMMU", "idr2=", idr2, "idr7=", rd(SMMU + SMMU_IDR7));
+	pgsz = (idr1 >> 31) ? 0x10000 : 0x1000;
+	uintptr_t npage = 1u << (((idr1 >> 28) & 7) + 1);
+	gr1 = SMMU + pgsz;
+	cb_base = SMMU + npage * pgsz;
+	*nsmr = idr0 & 0xff;
+	*ncb = idr1 & 0xff;
+	con_hex2("P1 SMMU", "nsmr=", *nsmr, "ncb=", *ncb);
+	con_hex2("P1 SMMU", "pgsz=", (uint32_t)pgsz, "cbbase=", (uint32_t)cb_base);
+	/* valid SMRs, compactly: index<<16 | id, with S2CR */
+	unsigned shown = 0;
+	for (uint32_t n = 0; n < *nsmr && n < 128; n++) {
+		uint32_t smr = rd(SMMU + SMMU_SMR(n));
+		if (!(smr & (1u << 31)))
+			continue;
+		if (shown++ < 10)
+			con_hex2("P1 SMR", "n/smr=", n << 24 | (smr & 0xffffff), "s2cr=", rd(SMMU + SMMU_S2CR(n)));
+	}
+	con_hex("P1 valid SMRs", shown);
+	for (uint32_t c = 0; c < *ncb && c < 4; c++)
+		con_hex2("P1 CB", "sctlr=", rd(cb_base + c * pgsz + CB_SCTLR), "fsr=", rd(cb_base + c * pgsz + CB_FSR));
+	return *nsmr && *ncb && cb_base + *ncb * pgsz <= SMMU + 0x40000;
+}
+
+static void hfi_table(uint64_t pa)
+{
+	/* a6xx_hfi.h: table {version, size(dwords), qhdr0_offset, qhdr_size, num_queues, active_queues}
+	 * then queue headers {status, iova, type, size, msg_size, dropped, rx_wm, tx_wm, rx_req, tx_req,
+	 * read_index, write_index}; queues (4 KiB) after the table page */
+	static const uint32_t hdr[6] = { 0, 6 + 3 * 12, 6, 12, 3, 3 };
+	for (int i = 0; i < 6; i++)
+		wr(pa + 4 * i, hdr[i]);
+	for (uint32_t q = 0; q < 3; q++) {
+		uint64_t h = pa + 24 + 48 * q;
+		uint32_t v[12] = { 1, (uint32_t)(VA_HFI + 0x1000 * (q + 1)), (10u << 8) | q, 0x400, 0, 0, 1, 1, 1, 0, 0, 0 };
+		for (int i = 0; i < 12; i++)
+			wr(h + 4 * i, v[i]);
+	}
+}
+
+void gpu2_probe(void)
+{
+	for (int i = 0; i < 12; i++)
+		results[i] = '-';
+	con_str("GPU2", "A740 probe 2: GMU smmu context + boot");
+	s1_cmddb();
+	s3_arc_votes();
+	s4_gcc_on();
+	s6_cx_gdsc();
+	s7_gmu_clocks();
+	s9_tcm();
+	char l1s[16] = "S1..9 ";
+	for (int i = 1; i <= 9; i++)
+		l1s[5 + i] = results[i];
+	l1s[15] = 0;
+	con_clear(BLUE);
+	con_str("GPU2 page 2", "power + TCM (o = ok)");
+	con_str("GPU2 S1-9", l1s);
+	if (results[6] != 'o' || results[9] != 'o') {
+		con_str("GPU2", "power/TCM failed: stop");
+		return;
+	}
+
+	uint32_t nsmr, ncb;
+	if (!smmu_survey(&nsmr, &ncb)) {
+		con_str("GPU2", "smmu survey odd: stop");
+		return;
+	}
+	/* a context bank nobody uses, an SMR slot (reuse one already matching SID 5) */
+	uint32_t cb = ~0u, slot = ~0u;
+	for (uint32_t c = ncb; c-- > 0;)
+		if (!(rd(cb_base + c * pgsz + CB_SCTLR) & 1)) {
+			int used = 0;
+			for (uint32_t n = 0; n < nsmr && n < 128; n++) {
+				uint32_t smr = rd(SMMU + SMMU_SMR(n));
+				used |= (smr >> 31) && (rd(SMMU + SMMU_S2CR(n)) & 0xff) == c;
+			}
+			if (!used) {
+				cb = c;
+				break;
+			}
+		}
+	for (uint32_t n = 0; n < nsmr && n < 128 && slot == ~0u; n++)
+		if ((rd(SMMU + SMMU_SMR(n)) & 0x80007fffu) == (0x80000000u | GMU_SID))
+			slot = n;
+	for (uint32_t n = 0; n < nsmr && n < 128 && slot == ~0u; n++)
+		if (!(rd(SMMU + SMMU_SMR(n)) >> 31))
+			slot = n;
+	con_hex2("P2 pick", "cb=", cb, "smr slot=", slot);
+	if (cb == ~0u || slot == ~0u)
+		return;
+
+	/* page tables and memory */
+	con_str("NEXT", "P2 carve-out + tables");
+	carve_next = CARVE;
+	l1 = carve_page();
+	l2[0] = l2[1] = 0;
+	uint64_t code = map(VA_CODE, 0x11000);
+	(void)map(0x100000, 0x9000);
+	(void)map(0x200000, 0x13000);
+	(void)map(0x300000, 0x1c000);
+	(void)map(0x60000000, 0x2000);
+	uint64_t log = map(VA_LOG, LOG_SIZE);
+	uint64_t hfi = map(VA_HFI, HFI_SIZE);
+	/* the firmware's DDR block {0x4000, 0x10210} */
+	const uint8_t *f = _gmu_fw_start, *end = _gmu_fw_end;
+	uint32_t copied = 0;
+	while (f + 16 <= end) {
+		uint32_t addr = f[0] | f[1] << 8 | f[2] << 16 | (uint32_t)f[3] << 24;
+		uint32_t size = f[4] | f[5] << 8 | f[6] << 16 | (uint32_t)f[7] << 24;
+		if (f + 16 + size > end)
+			break;
+		if (size && addr >= VA_CODE && addr + size <= VA_CODE + 0x11000) {
+			copy_words(code + (addr - VA_CODE), f + 16, size);
+			copied += size;
+		}
+		f += 16 + size;
+	}
+	hfi_table(hfi);
+	con_hex2("P2 carve", "used=", (uint32_t)(carve_next - CARVE), "code bytes=", copied);
+	con_hex2("P2 code", "w0=", rd(code), "l1[0]=", (uint32_t)rd64(l1));
+
+	/* context bank: AArch64 stage 1, 39-bit VA, 4 KiB, non-cacheable walks/memory (MMU-off writes) */
+	con_str("NEXT", "P2 smmu program");
+	uintptr_t c = cb_base + cb * pgsz;
+	wr(c + CB_SCTLR, 0);
+	wr(gr1 + GR1_CBA2R(cb), 1);				/* VA64 */
+	wr(gr1 + GR1_CBAR(cb), (1u << 16) | (3u << 8) | (0xfu << 12) | (cb + 1));	/* S1 trans, S2 bypass */
+	wr(c + CB_TCR2, (2u << 0) | (7u << 15));		/* PASize 40-bit, SEP upstream */
+	wr(c + CB_TTBR0, (uint32_t)l1);
+	wr(c + CB_TTBR0 + 4, (uint32_t)(l1 >> 32));
+	wr(c + CB_TCR, 25u | (1u << 23));			/* T0SZ 25, TG0 4K, NC walks, EPD1 */
+	wr(c + CB_MAIR0, 0x44);					/* attr0 normal non-cacheable */
+	wr(c + CB_MAIR1, 0);
+	wr(c + CB_ACTLR, 0x32b);				/* DT qcom,actlr for kgsl-smmu */
+	wr(c + CB_FSR, rd(c + CB_FSR));				/* clear stale faults */
+	wr(c + CB_TLBIALL, 0);
+	wr(c + CB_TLBSYNC, 0);
+	uint32_t tus = poll(c + CB_TLBSTATUS, 1, 0, 10000);
+	wr(c + CB_SCTLR, 1u | (1u << 1) | (1u << 2) | (1u << 5));	/* M, TRE, AFE, CFRE */
+	wr(SMMU + SMMU_S2CR(slot), cb & 0xff);			/* translate through cb */
+	wr(SMMU + SMMU_SMR(slot), 0x80000000u | GMU_SID);
+	uint32_t cr0 = rd(SMMU + SMMU_CR0);
+	con_hex2("P2 CB", "sctlr=", rd(c + CB_SCTLR), "tlbsync us=", tus);
+	con_hex2("P2 SMR", "smr=", rd(SMMU + SMMU_SMR(slot)), "s2cr=", rd(SMMU + SMMU_S2CR(slot)));
+	con_hex2("P2 SMMU", "cr0=", cr0, "cbar=", rd(gr1 + GR1_CBAR(cb)));
+	step(10, rd(c + CB_SCTLR) & 1);
+
+	/* GMU register setup [KGSL gen7_gmu_register_config / Linux a6xx_gmu_fw_start] */
+	con_str("NEXT", "P3 gmu config");
+	wr(0x03d9e0e4, 1);			/* CX_MISC TCM_RET_CNTL */
+	wr(0x03d7e3c4, 1);			/* GMU_CM3_FALNEXT_INTF */
+	wr(0x03d7e3c0, 1);			/* GMU_CM3_FAL_INTF */
+	wr(0x03d7e070, 0);			/* FW_INIT_RESULT */
+	wr(0x03d7e004, 2);			/* CM3_BOOT_CONFIG */
+	wr(0x03d7e614, (uint32_t)VA_HFI);	/* HFI_QTBL_ADDR */
+	wr(0x03d7e610, 1);			/* HFI_QTBL_INFO */
+	wr(0x03d8ec44, 0x80c808a0u);		/* AHB_FENCE_RANGE_0 */
+	wr(0x03d7e0b4, 0x4052);			/* CM3_CFG */
+	for (uintptr_t a = 0x03d0f00c; a <= 0x03d0f018; a += 4)
+		wr(a, 0x00071620u);		/* GBIF_QSB_SIDE0..3 */
+	wr(0x03d0f114, 0);			/* GBIF_HALT */
+	wr(0x03d7e738, 0);			/* GENERAL_9: log write pointer */
+	wr(0x03d7e73c, 0x07020100u);		/* GENERAL_10: GMU chip id (Linux catalog, A740) */
+	wr(0x03d7e734, (uint32_t)(VA_LOG & 0xfffff000u) | (uint32_t)(LOG_SIZE / 0x1000 - 1));	/* GENERAL_8 */
+	wr(0x03d7d03c, 1);			/* SYS_BUS_CONFIG */
+	wr(0x03d7d000, 1);			/* ICACHE_CONFIG */
+	wr(0x03d7d004, 1);			/* DCACHE_CONFIG */
+
+	/* release the M3 and wait for init done [(FW_INIT_RESULT & 0x1ff) == 0x100] */
+	con_str("NEXT", "P4 gmu release");
+	wr(0x03d7e000, 0);
+	uint64_t t0 = ticks();
+	uint32_t res = 0, seen = 0, last = ~0u;
+	while (ticks() - t0 < 19200000ULL / 2) {	/* 500 ms */
+		res = rd(0x03d7e070);
+		if (res != last && seen < 6) {
+			con_hex2("P4 initres", "val=", res, "ms=", (uint32_t)((ticks() - t0) / 19200));
+			seen++;
+			last = res;
+		}
+		if ((res & 0x1ff) == 0x100)
+			break;
+	}
+	int init_ok = (res & 0x1ff) == 0x100;
+	step(11, init_ok);
+	con_hex2("P4 gmu", "fwbusy=", rd(0x03d7e068), "g2h=", rd(0x03d7e648));
+	con_hex2("P4 smmu", "fsr=", rd(c + CB_FSR), "far=", rd(c + CB_FAR));
+	con_hex2("P4 smmu", "farhi=", rd(c + CB_FAR + 4), "fsynr0=", rd(c + CB_FSYNR0));
+	if (init_ok) {
+		con_str("NEXT", "P5 hfi start");
+		wr(0x03d7e618, 1);		/* HFI_CTRL_INIT */
+		uint32_t us = poll(0x03d7e600, 1, 1, 50000);
+		con_hex2("P5 HFI", "status=", rd(0x03d7e600), "us=", us);
+		results[0] = us != ~0u ? 'o' : 'X';
+	}
+	con_hex2("P5 GEN", "g0=", rd(0x03d7e714), "g9 logwp=", rd(0x03d7e738));
+	con_hex2("P5 log", "w0=", rd(log), "w1=", rd(log + 4));
+	con_hex2("P5 log", "w2=", rd(log + 8), "w3=", rd(log + 12));
+	con_hex2("P5 hfi q0", "rd idx=", rd(hfi + 24 + 40), "wr idx=", rd(hfi + 24 + 44));
+	/* stop the M3 again (nothing else will service it) */
+	wr(0x03d7e000, 1);
+	char line[24] = "smmu/init/hfi ";
+	line[14] = results[10];
+	line[15] = results[11];
+	line[16] = results[0];
+	line[17] = 0;
+	con_str("GPU2 RESULT", line);
+}
