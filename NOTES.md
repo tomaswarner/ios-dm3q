@@ -556,6 +556,12 @@
   qcom_scm error; maybe Gunyah/TZ refusing a region the HLOS VM did not hand over). No reset. The phone DT qcom_scm node
   has no clocks/interconnects. Open: decode the error; check downstream qcom_scm/KGSL zap path on Gunyah targets
   (hyp-assign / SHM bridge / mem_setup size rules). Printing x0 as 64-bit next time.
+  **🎉 ZAP SHADER LOADED, GPU NON-SECURE (gpu6b, photo):** the phone's own mdt_loader.ko (vendor_boot ramdisk,
+  disassembled) passes MEM_SETUP size = ALIGN(paddr+memsz, 4K) - min paddr = 0x1000 (we passed 0x430 -> 0xFFCFFFBA).
+  With 0x1000: INIT_IMAGE 0, MEM_SETUP 0, segment copied (page zeroed first), AUTH_AND_RESET 0, CP_SET_SECURE_MODE 0
+  idle at once, RBBM_SECVID_TRUST_CNTL 0, second CP_MEM_WRITE 0x600DF00D landed. Full A740 bring-up from bare metal
+  under Gunyah DONE (shim/gpu.c DIAG=gpu6). qcom-scm.ko init_image/mem_setup = same SMC encoding as ours, no SHM bridge.
+  NEXT: port the sequence into XNU (driver + user client, KGSL-XNU-DESIGN.md), then Turnip.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
