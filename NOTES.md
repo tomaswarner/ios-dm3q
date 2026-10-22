@@ -607,6 +607,12 @@
   Flag removed again (system stays on lavapipe). NEXT: VK_EXT_external_memory_host on Turnip-KGSL: xnu ioctl that
   wires user pages and maps them into the GPU table (own VA range, L3 tables), Turnip import path using it.
   USB note (user): the cable must be unplugged/replugged after boot for the USB link to come up.
+  **🎉 SWEETMETAL OK ON TURNIP (boot x28g = kernel 017 / xnu 0115, 2026-10-22 ~11:00):** Mesa: VK_EXT_external_memory_host
+  for Turnip-KGSL (tu_knl bo_init_host_ptr -> KGSL_IOS_IMPORT, host_ptr BOs never munmapped, minImportedHostPointerAlignment
+  16 KiB, vkGetMemoryHostPointerPropertiesEXT). sm_smoke with /var/tmp/sweet_vk_turnip: compute, render, texture,
+  surface (IOSurface-style host memory, 64/64 texels, deallocator ran), depth: SWEETMETAL OK on the Adreno 740.
+  Local relink: tools/xnu-relink.sh KIT OUT NEW.o.. (CI link kit + relink/ from xnu.yml after commit 8b...; links with
+  Xcode 27's ld, only libfirehose_kernel.a was missing).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
