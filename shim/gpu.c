@@ -801,14 +801,30 @@ static void gpu6_zap(uint64_t ring, uint32_t *wptr, uint64_t test, uintptr_t cbp
 		con_str("GPU6 RESULT", "INIT_IMAGE refused");
 		return;
 	}
-	con_str("NEXT", "Z2 PAS_MEM_SETUP");
-	struct smc_res r2 = scm4(0x42000202, 3, 13, ZAP_REGION, 0x430, 0);
-	con_hex2("Z2 mem", "x0=", (uint32_t)r2.a0, "x1=", (uint32_t)r2.a1);
+	/* phone's mdt_loader.ko (__qcom_mdt_load, disassembled): size = ALIGN(paddr + memsz, 4K) - min paddr = 0x1000,
+	 * not the 0x430 segment length (gpu6: 0x430 -> x0 0xFFCFFFBA). Fallback 0x2000 (whole DT region) after
+	 * PAS_SHUTDOWN + a fresh INIT_IMAGE, as mdt_loader's error path does. */
+	static const uint32_t sizes[2] = { 0x1000, 0x2000 };
+	struct smc_res r2 = { 0 };
+	for (int i = 0; i < 2; i++) {
+		if (i) {
+			struct smc_res sd = scm4(0x42000206, 1, 13, 0, 0, 0);
+			r1 = scm4(0x42000201, 0x82, 13, ZAP_META, 0, 0);
+			con_hex2("Z1 retry", "shut x0=", (uint32_t)sd.a0, "init x0=", (uint32_t)r1.a0);
+		}
+		con_hex2("NEXT", "Z2 MEM_SETUP size=", sizes[i], "try=", (uint32_t)i);
+		r2 = scm4(0x42000202, 3, 13, ZAP_REGION, sizes[i], 0);
+		con_hex2("Z2 mem", "x0=", (uint32_t)r2.a0, "x1=", (uint32_t)r2.a1);
+		if (!r2.a0 && !r2.a1)
+			break;
+	}
 	if (r2.a0 || r2.a1) {
 		con_str("GPU6 RESULT", "MEM_SETUP refused");
 		return;
 	}
 	con_str("NEXT", "Z3 copy segment");
+	for (uint32_t o = 0; o < 0x1000; o += 4)
+		wr(ZAP_REGION + o, 0);
 	copy_words(ZAP_REGION, z + 0x1000, 0x430);
 	__asm__ volatile("dsb sy" ::: "memory");
 	con_hex2("Z3 seg", "w0=", rd(ZAP_REGION), "w last=", rd(ZAP_REGION + 0x42c));
