@@ -551,6 +551,11 @@
   SIDs 0+1 -> one CB, never SID 2; HFI acks of this fw = {type 1, own id}. NEXT: zap shader (PAS 13, region
   0x9b09a000, a740_zap.mbn segment @0x1000 len 0x430) + CP_SET_SECURE_MODE 0, then move the bring-up into XNU
   (driver + user client for Turnip, KGSL-XNU-DESIGN.md / SAILFISH-LESSONS.md).
+  **gpu6 zap (photo):** PAS_INIT_IMAGE(13, metadata = mbn[0:0x94]+mbn[0x2000:0x2f38], 4 KiB aligned in the carve-out)
+  ACCEPTED (x0 0, x1 0). PAS_MEM_SETUP(13, 0x9b09a000, 0x430) REFUSED: x0 low32 = 0xFFCFFFBA (not a standard
+  qcom_scm error; maybe Gunyah/TZ refusing a region the HLOS VM did not hand over). No reset. The phone DT qcom_scm node
+  has no clocks/interconnects. Open: decode the error; check downstream qcom_scm/KGSL zap path on Gunyah targets
+  (hyp-assign / SHM bridge / mem_setup size rules). Printing x0 as 64-bit next time.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
