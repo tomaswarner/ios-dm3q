@@ -113,6 +113,11 @@ jobs:
         run: |
           mkdir -p out
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          # local relink kit (tools/xnu-relink.sh): the link archive above + what it does not hold
+          mkdir -p out/relink
+          cp dxb/fakeroot/usr/local/lib/kernel/libfirehose_kernel.a out/relink/ 2>/dev/null || true
+          O=dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET
+          cp $O/nonlto.o $O/symbolsets.plist $O/all-alias.exp out/relink/ 2>/dev/null || true
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
 
