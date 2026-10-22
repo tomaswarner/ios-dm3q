@@ -512,9 +512,9 @@ MISSING_LOGGER
 {
 	if (!(self = [super init]))
 		return nil;
-	/* lavapipe rasterizes on LP_NUM_THREADS threads (all cores by default); leave two cores to
+	/* lavapipe rasterizes on LP_NUM_THREADS threads (all cores by default); leave most cores to
 	 * the rest of the system (USB, input, the window server's own threads) */
-	setenv("LP_NUM_THREADS", "6", 0);
+	setenv("LP_NUM_THREADS", "3", 0);
 	/* lavapipe's layout transitions never touch memory: let IOSurface textures alias their pages
 	 * (metal2vulkan local patch, see third_party/metal2vulkan-patches) */
 	if (access("/var/tmp/sweetmetal_noalias", F_OK) != 0)
