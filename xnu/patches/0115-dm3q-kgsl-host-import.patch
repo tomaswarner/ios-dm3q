@@ -1,0 +1,300 @@
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+index 1683ffa..b2a9e20 100644
+--- a/bsd/dev/sweet_kgsl.c
++++ b/bsd/dev/sweet_kgsl.c
+@@ -20,6 +20,11 @@
+  * context's timestamp into the memstore; waits poll it. Syncpoints need no
+  * work (everything retires in submission order).
+  *
++ * Host memory (VK_EXT_external_memory_host, KGSL_IOS_IMPORT): a range of the caller's memory
++ * (an IOSurface, a no-copy buffer) is wired and mapped page by page at GPU VA 0x2_00000000..
++ * (1 GiB window, L3 tables from the pool), cacheable inner-shareable (the kgsl-smmu is
++ * dma-coherent and KGSL maps IOCOHERENT buffers IOMMU_CACHE): the GPU snoops the CPU caches.
++ *
+  * Not yet: GPU isolation between processes (every buffer is visible to
+  * every GPU job), interrupts (waits poll every 1 ms), hang recovery,
+  * cached/coherent memory, USE_CPU_MAP, sparse buffers.
+@@ -113,6 +118,12 @@ struct kgsl_ios_map {
+ 	uint64_t addr, size;
+ };
+ 
++/* ours: wire [addr, addr + size) of the caller (16 KiB aligned) and map it for the GPU */
++struct kgsl_ios_import {
++	uint64_t addr, size, gpuaddr;   /* gpuaddr out */
++	uint32_t id, flags;             /* id out */
++};
++
+ /* ours: read up to 32 GPU registers (dword offsets from 0x03d00000), for hang debugging over USB */
+ struct kgsl_ios_regs {
+ 	uint32_t n, off[32], val[32];
+@@ -137,6 +148,7 @@ _Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
+ #define IOCTL_KGSL_GPU_COMMAND                  _IOWR(KGSL_IOC, 0x4a, struct kgsl_gpu_command)
+ #define IOCTL_KGSL_IOS_MAP                      _IOWR(KGSL_IOC, 0xe0, struct kgsl_ios_map)
+ #define IOCTL_KGSL_IOS_REGS                     _IOWR(KGSL_IOC, 0xe1, struct kgsl_ios_regs)
++#define IOCTL_KGSL_IOS_IMPORT                   _IOWR(KGSL_IOC, 0xe2, struct kgsl_ios_import)
+ 
+ #define KGSL_PROP_DEVICE_INFO           0x01
+ #define KGSL_PROP_GPU_RESET_STAT        0x09
+@@ -162,6 +174,11 @@ _Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
+ #define A740_TRAP_BASE          0x1fffffffff000ull
+ 
+ #define POOL_GPUVA      0x100000000ull
++#define HOST_GPUVA      0x200000000ull          /* imported host memory, L1 index 8 */
++#define HOST_WINDOW     0x40000000ull
++#define HOST_SLOTS      (uint32_t)(HOST_WINDOW / 0x4000)
++#define MAIR0_LINUX     0xf404ff44u             /* attr0 NC, 1 WBRWA, 2 device, 3 INC/OWB (io-pgtable-arm) */
++#define PTE_HOST        ((1ull << 10) | (3ull << 8) | (1ull << 6) | (1ull << 2) | 3ull)  /* AF, IS, AP=01, attr1, page */
+ #define BLOCK           0x200000ull
+ #define MEMSTORE_OFF    0x4000u
+ #define BO_PAGE         0x4000ull               /* 16 KiB: the user page size */
+@@ -184,9 +201,11 @@ _Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
+ #define CP_HW_FAULT             0x02084u
+ 
+ struct kbo {
+-	bool used;
++	bool used, host;
+ 	int owner;
+-	uint64_t pa, size;
++	uint64_t pa, size;              /* host: pa unused */
++	uint64_t uaddr, gva;            /* host: the caller's range and its GPU VA */
++	vm_map_t map;                   /* host: the wired map (referenced) */
+ 	memory_object_t pager;
+ 	ipc_port_t entry;
+ };
+@@ -203,6 +222,10 @@ static struct {
+ 	uint32_t npages;
+ 	vm_offset_t blk0;               /* kernel mapping of the first block (L2 table, memstore) */
+ 	uint64_t *bitmap;               /* one bit per 16 KiB data page */
++	vm_offset_t l1, cb;             /* GPU L1 table, context bank 0 registers */
++	vm_offset_t host_l2;            /* L2 table of the host window */
++	vm_offset_t host_l3[512];       /* its L3 tables, made on first use */
++	uint64_t *host_bitmap;          /* one bit per 16 KiB of the host window */
+ 	bool open[MAX_OPEN];
+ 	struct kbo bo[MAX_BO];
+ 	struct kctx ctx[MAX_CTX];
+@@ -290,10 +313,102 @@ pages_alloc(uint32_t n, uint32_t align_pages)
+ 	return -1;
+ }
+ 
++/* ---- host memory window ---- */
++extern pmap_t get_task_pmap(task_t);
++extern task_t current_task(void);
++extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
++extern kern_return_t vm_map_wire_kernel(vm_map_t, vm_map_offset_t, vm_map_offset_t, vm_prot_t, vm_tag_t, boolean_t);
++extern kern_return_t vm_map_unwire(vm_map_t, vm_map_offset_t, vm_map_offset_t, boolean_t);
++
++static void
++gpu_tlb_flush(void)
++{
++	__asm__ volatile ("dsb sy" ::: "memory");
++	wr32(k.cb + 0x618, 0);                          /* CB_TLBIALL */
++	wr32(k.cb + 0x7f0, 0);                          /* CB_TLBSYNC */
++	for (int us = 0; us < 10000 && (rd32(k.cb + 0x7f4) & 1u); us++) {
++		delay(1);
++	}
++}
++
++/* a zeroed 4 KiB table from a pool page, mapped for the kernel; its pa in *pa */
++static vm_offset_t
++table_page(uint64_t *pa)
++{
++	int64_t p = pages_alloc(1, 1);
++	if (p < 0) {
++		return 0;
++	}
++	*pa = k.data_pa + (uint64_t)p * BO_PAGE;
++	vm_offset_t va = sweet_gpu_map(*pa, BO_PAGE);
++	if (va) {
++		for (unsigned i = 0; i < 512; i++) {
++			wr64(va + 8u * i, 0);
++		}
++	}
++	return va;
++}
++
++static int64_t
++host_slots_alloc(uint32_t n)
++{
++	for (uint32_t s = 0; s + n <= HOST_SLOTS; s++) {
++		uint32_t i;
++		for (i = 0; i < n && !((k.host_bitmap[(s + i) / 64] >> ((s + i) % 64)) & 1u); i++) {
++		}
++		if (i == n) {
++			for (i = 0; i < n; i++) {
++				k.host_bitmap[(s + i) / 64] |= 1ull << ((s + i) % 64);
++			}
++			return s;
++		}
++		s += i;
++	}
++	return -1;
++}
++
++/* write (or clear, pa == ~0) the 4 KiB PTE for host-window VA gva; false when no table */
++static bool
++host_pte(uint64_t gva, uint64_t pa)
++{
++	unsigned i2 = (unsigned)((gva - HOST_GPUVA) >> 21), i3 = (unsigned)((gva >> 12) & 0x1ff);
++	if (!k.host_l3[i2]) {
++		uint64_t tpa;
++		vm_offset_t t = table_page(&tpa);
++		if (!t) {
++			return false;
++		}
++		k.host_l3[i2] = t;
++		wr64(k.host_l2 + 8u * i2, tpa | 3u);
++	}
++	wr64(k.host_l3[i2] + 8u * i3, pa == ~0ull ? 0 : (pa | PTE_HOST));
++	return true;
++}
++
++static void
++host_unmap(struct kbo *b, uint64_t mapped)
++{
++	for (uint64_t o = 0; o < mapped; o += 0x1000) {
++		(void)host_pte(b->gva + o, ~0ull);
++	}
++	gpu_tlb_flush();
++	uint32_t s = (uint32_t)((b->gva - HOST_GPUVA) / 0x4000);
++	for (uint32_t i = 0; i < b->size / 0x4000; i++) {
++		k.host_bitmap[(s + i) / 64] &= ~(1ull << ((s + i) % 64));
++	}
++}
++
+ /* ---- buffers ---- */
+ static void
+ bo_release(struct kbo *b)
+ {
++	if (b->host) {
++		host_unmap(b, b->size);
++		(void)vm_map_unwire(b->map, (vm_map_offset_t)b->uaddr, (vm_map_offset_t)(b->uaddr + b->size), TRUE);
++		vm_map_deallocate(b->map);
++		bzero(b, sizeof(*b));
++		return;
++	}
+ 	pages_mark((uint32_t)((b->pa - k.data_pa) / BO_PAGE), (uint32_t)(b->size / BO_PAGE), false);
+ 	if (b->entry != IPC_PORT_NULL) {
+ 		mach_memory_entry_port_release(b->entry);
+@@ -375,6 +490,64 @@ fail:
+ 	return ENOMEM;
+ }
+ 
++/* KGSL_IOS_IMPORT: the caller's [addr, addr + size), wired (user wiring: munmap still works and
++ * unwires; Vulkan forbids freeing imported host memory before the VkDeviceMemory) */
++static int
++bo_import(int owner, struct kgsl_ios_import *im)
++{
++	if ((im->addr | im->size) & 0x3fffu || !im->size || im->size > (256ull << 20)) {
++		return EINVAL;
++	}
++	lck_mtx_lock(&kgsl_mtx);
++	int id = -1;
++	for (int i = 0; i < MAX_BO && id < 0; i++) {
++		if (!k.bo[i].used) {
++			id = i;
++		}
++	}
++	int64_t slot = id < 0 ? -1 : host_slots_alloc((uint32_t)(im->size / 0x4000));
++	if (slot < 0) {
++		lck_mtx_unlock(&kgsl_mtx);
++		return ENOMEM;
++	}
++	struct kbo *b = &k.bo[id];
++	b->used = b->host = true;
++	b->owner = owner;
++	b->size = im->size;
++	b->uaddr = im->addr;
++	b->gva = HOST_GPUVA + (uint64_t)slot * 0x4000;
++	b->map = current_map();
++	vm_map_reference(b->map);
++	kern_return_t kr = vm_map_wire_kernel(b->map, (vm_map_offset_t)im->addr, (vm_map_offset_t)(im->addr + im->size),
++	    VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_IOKIT, TRUE);
++	if (kr != KERN_SUCCESS) {
++		host_unmap(b, 0);
++		vm_map_deallocate(b->map);
++		bzero(b, sizeof(*b));
++		lck_mtx_unlock(&kgsl_mtx);
++		return kr == KERN_INVALID_ADDRESS ? EFAULT : ENOMEM;
++	}
++	pmap_t pm = get_task_pmap(current_task());
++	uint64_t o;
++	for (o = 0; o < im->size; o += 0x1000) {
++		uint64_t va = im->addr + o;
++		ppnum_t pn = pmap_find_phys(pm, va);
++		if (!pn || !host_pte(b->gva + o, ptoa_64(pn) + (va & PAGE_MASK & ~0xfffull))) {
++			break;
++		}
++	}
++	if (o < im->size) {
++		bo_release(b);          /* unmaps what was mapped (all slots), unwires */
++		lck_mtx_unlock(&kgsl_mtx);
++		return EFAULT;
++	}
++	gpu_tlb_flush();
++	im->id = (uint32_t)id + 1;
++	im->gpuaddr = b->gva;
++	lck_mtx_unlock(&kgsl_mtx);
++	return 0;
++}
++
+ static struct kbo *
+ bo_get(int owner, uint32_t id)
+ {
+@@ -403,7 +576,7 @@ bo_map(int owner, struct kgsl_ios_map *m)
+ 	/* the lock (a sleepable mutex) keeps the entry alive across the map */
+ 	lck_mtx_lock(&kgsl_mtx);
+ 	struct kbo *b = bo_get(owner, m->id);
+-	if (!b || b->entry == IPC_PORT_NULL) {
++	if (!b || b->host || b->entry == IPC_PORT_NULL) {
+ 		lck_mtx_unlock(&kgsl_mtx);
+ 		return EINVAL;
+ 	}
+@@ -692,7 +865,7 @@ kgsl_ioctl(dev_t dev, u_long cmd, caddr_t data, __unused int fflag, __unused pro
+ 		lck_mtx_lock(&kgsl_mtx);
+ 		struct kbo *b = bo_get(owner, gi->id);
+ 		if (b) {
+-			gi->gpuaddr = POOL_GPUVA + (b->pa - k.pool);
++			gi->gpuaddr = b->host ? b->gva : POOL_GPUVA + (b->pa - k.pool);
+ 			gi->size = gi->mmapsize = b->size;
+ 			gi->flags = 0;
+ 			gi->useraddr = 0;
+@@ -714,6 +887,8 @@ kgsl_ioctl(dev_t dev, u_long cmd, caddr_t data, __unused int fflag, __unused pro
+ 		return wait_ts(owner, (struct kgsl_device_waittimestamp_ctxtid *)data);
+ 	case IOCTL_KGSL_IOS_MAP:
+ 		return bo_map(owner, (struct kgsl_ios_map *)data);
++	case IOCTL_KGSL_IOS_IMPORT:
++		return bo_import(owner, (struct kgsl_ios_import *)data);
+ 	case IOCTL_KGSL_IOS_REGS: {
+ 		struct kgsl_ios_regs *r = (struct kgsl_ios_regs *)data;
+ 		if (r->n > 32) {
+@@ -762,10 +937,11 @@ sweet_kgsl_init(void)
+ 	k.data_pa = k.pool + BLOCK;
+ 	k.npages = (uint32_t)((k.pool_size - BLOCK) / BO_PAGE);
+ 	k.blk0 = sweet_gpu_map(k.pool, BLOCK);
+-	vm_offset_t l1 = sweet_gpu_map(sweet_gpu_ho(3), 0x1000);
+-	vm_offset_t cb = sweet_gpu_map(sweet_gpu_ho(2), 0x1000);
++	vm_offset_t l1 = k.l1 = sweet_gpu_map(sweet_gpu_ho(3), 0x1000);
++	vm_offset_t cb = k.cb = sweet_gpu_map(sweet_gpu_ho(2), 0x1000);
+ 	k.bitmap = (uint64_t *)kalloc_data((k.npages + 63) / 64 * 8, Z_WAITOK | Z_ZERO);
+-	if (!k.blk0 || !l1 || !cb || !k.bitmap) {
++	k.host_bitmap = (uint64_t *)kalloc_data(HOST_SLOTS / 8, Z_WAITOK | Z_ZERO);
++	if (!k.blk0 || !l1 || !cb || !k.bitmap || !k.host_bitmap) {
+ 		printf("SWEET KGSL: mapping/alloc failed\n");
+ 		return;
+ 	}
+@@ -785,6 +961,15 @@ sweet_kgsl_init(void)
+ 	}
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	wr64(l1 + 8u * i1, k.pool | 3u);                /* table descriptor */
++	/* host window: its L2 table, attr1 = cacheable in MAIR0 (attr0 NC unchanged) */
++	uint64_t hl2;
++	k.host_l2 = table_page(&hl2);
++	if (!k.host_l2 || (rd64(l1 + 8u * (unsigned)(HOST_GPUVA >> 30)) & 1u)) {
++		printf("SWEET KGSL: no host window\n");
++		return;
++	}
++	wr64(l1 + 8u * (unsigned)(HOST_GPUVA >> 30), hl2 | 3u);
++	wr32(cb + 0x038, MAIR0_LINUX);                  /* CB_MAIR0 */
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	wr32(cb + 0x618, 0);                            /* CB_TLBIALL */
+ 	wr32(cb + 0x7f0, 0);                            /* CB_TLBSYNC */
