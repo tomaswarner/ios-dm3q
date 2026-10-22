@@ -1,0 +1,51 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 07f9b45..327d912 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -32,7 +32,10 @@
+ #include <libkern/libkern.h>
+ #include <kern/locks.h>
+ 
+-extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
++#ifndef VM_WIMG_IO
++#define VM_WIMG_IO              0x7             /* osfmk/arm/memory_types.h */
++#endif
+ extern kern_return_t thread_terminate(thread_t);
+ void sweet_gpu_start(void);
+ extern void sweet_kgsl_init(void);
+@@ -102,7 +105,8 @@ sweet_gpu_map(uint64_t pa, uint64_t size)
+ {
+ 	uint64_t base = pa & ~(uint64_t)(MAP_PAGE - 1);
+ 	uint64_t len = (pa + size - base + MAP_PAGE - 1) & ~(uint64_t)(MAP_PAGE - 1);
+-	vm_offset_t va = ml_io_map((vm_offset_t)base, (vm_size_t)len);
++	/* kernel_map, not the 8 MiB io_submap (the pool's 2 MiB block would eat a quarter of it) */
++	vm_offset_t va = ml_io_map_unmappable((vm_offset_t)base, (vm_size_t)len, VM_WIMG_IO);
+ 	return va ? va + (vm_offset_t)(pa - base) : 0;
+ }
+ 
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+index 95a3633..dcf2dfa 100644
+--- a/bsd/dev/sweet_kgsl.c
++++ b/bsd/dev/sweet_kgsl.c
+@@ -50,7 +50,7 @@
+ #define DEVICE_PAGER_CONTIGUOUS 0x100           /* osfmk/device/device_port.h */
+ #endif
+ 
+-extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
+ extern void ml_io_unmap(vm_offset_t, vm_size_t);
+ extern uint64_t sweet_gpu_ho(unsigned i);
+ extern vm_offset_t sweet_gpu_map(uint64_t pa, uint64_t size);
+@@ -333,8 +333,9 @@ bo_alloc(int owner, struct kgsl_gpumem_alloc_id *a)
+ 	b->size = size;
+ 	lck_mtx_unlock(&kgsl_mtx);
+ 
+-	/* zero it (KGSL does; Turnip relies on zeroed BOs) */
+-	vm_offset_t z = ml_io_map_wcomb((vm_offset_t)b->pa, (vm_size_t)size);
++	/* zero it (KGSL does; Turnip relies on zeroed BOs). Not ml_io_map_wcomb: io_submap mappings are
++	 * permanent (8 MiB, KMA_PERMANENT) and ml_io_unmap of one panics (0112: vm_map_delete "permanent entry") */
++	vm_offset_t z = ml_io_map_unmappable((vm_offset_t)b->pa, (vm_size_t)size, VM_WIMG_WCOMB);
+ 	if (!z) {
+ 		goto fail;
+ 	}
