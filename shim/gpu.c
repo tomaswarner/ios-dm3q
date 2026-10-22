@@ -812,7 +812,13 @@ static void gpu5_cp(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 	wr(SMMU + SMMU_S2CR(slot), cb);
 	wr(SMMU + SMMU_SMR(slot), 0x80000000u | GPU_SID);
+	/* SID 1 too: the phone DT and Linux give the GPU streams 0 AND 1 (same context bank); an unmatched
+	 * stream is a global fault, which resets this phone (gpu5b/5c: reset as soon as the SQE ran; sailfish
+	 * 0120a likewise). Not SID 2: TZ's gfx3d_secure (sailfish 0122a). */
+	wr(SMMU + SMMU_S2CR(slot + 1), cb);
+	wr(SMMU + SMMU_SMR(slot + 1), 0x80000000u | 1u);
 	con_hex2("P8 CB0", "sctlr=", rd(c + CB_SCTLR), "smr1=", rd(SMMU + SMMU_SMR(slot)));
+	con_hex2("P8 SMR2", "smr=", rd(SMMU + SMMU_SMR(slot + 1)), "s2cr=", rd(SMMU + SMMU_S2CR(slot + 1)));
 
 	/* GX register init (STAGES-3PLUS s6, rows tagged R plus cheap S) */
 	con_str("NEXT", "P9 gx init");

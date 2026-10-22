@@ -536,6 +536,11 @@
   after "NEXT P10 sqe start", < ~1 ms): the microcode now runs. Suspect: Linux/KGSL call qcom_scm_set_gpu_smmu_aperture(0)
   (SVC_MP 0x0c cmd 0x1b, args 0xffff0000|cb, ~0, ~0, ~0) BEFORE starting the SQE; without it the CP's access to the
   CB0 aperture is an XPU violation -> reset. gpu5c: IS_CALL_AVAIL + that SCM call before CP_SQE_CNTL.
+  **gpu5c (photo):** SMMU aperture SCM available (IS_CALL_AVAIL x1 1) and accepted (x0 0), SoC still resets at
+  CP_SQE_CNTL=1. KGSL gen7_rb_start order = ours (SQE start, cp_init, then zap). ios-sailfish 0120a: "the stream starts
+  as FAULT, the first CP fetch reset the phone" -> unmatched-stream GLOBAL faults are fatal (context faults are not:
+  gpu2/gpu5 PF faults did not reset). Linux/phone DT give the GPU SIDs 0 AND 1; we routed only 0. gpu5d: SMR for
+  SID 1 -> CB0 as well (never SID 2 = TZ gfx3d_secure).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
