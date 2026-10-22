@@ -42,10 +42,10 @@ index 4f15084..bf6ff5e 100644
        result = vk_startup_errorf(physical_device->instance,
                                   VK_ERROR_INITIALIZATION_FAILED,
 diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
-index 5580ed8..ebf5700 100644
+index 5580ed8..cce47e3 100644
 --- a/src/freedreno/vulkan/tu_knl_kgsl.cc
 +++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
-@@ -35,6 +35,21 @@
+@@ -35,6 +35,51 @@
  #define KGSL_ION_SYSTEM_HEAP_MASK (1u << 25)
  
  
@@ -64,19 +64,52 @@ index 5580ed8..ebf5700 100644
 +   return (uint64_t)id << KGSL_MMAP_ID_SHIFT;
 +}
 +
++#ifdef __APPLE__
++/* TURNIP-IOS: xnu returns ENODEV for mmap() of a character device, so the DM3Q /dev/kgsl-3d0
++ * (xnu bsd/dev/sweet_kgsl.c) maps a buffer into the caller with a private ioctl instead. */
++struct kgsl_ios_map {
++   uint32_t id, flags; /* flags bit 0: map at addr, replacing what is there */
++   uint64_t addr, size;
++};
++#define IOCTL_KGSL_IOS_MAP _IOWR(KGSL_IOC_TYPE, 0xe0, struct kgsl_ios_map)
++
++static void *
++kgsl_dev_mmap(void *addr, size_t size, bool fixed, int fd, uint32_t id)
++{
++   struct kgsl_ios_map m = {
++      .id = id, .flags = fixed ? 1u : 0u, .addr = (uint64_t)(uintptr_t)addr, .size = size,
++   };
++   int ret;
++   do {
++      ret = ioctl(fd, IOCTL_KGSL_IOS_MAP, &m);
++   } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
++   return ret ? MAP_FAILED : (void *)(uintptr_t)m.addr;
++}
++#else
++static void *
++kgsl_dev_mmap(void *addr, size_t size, bool fixed, int fd, uint32_t id)
++{
++   return mmap(addr, size, PROT_READ | PROT_WRITE, MAP_SHARED | (fixed ? MAP_FIXED : 0), fd,
++               kgsl_mmap_offset(id));
++}
++#endif
++
  static int
  safe_ioctl(int fd, unsigned long request, void *arg)
  {
-@@ -190,7 +205,7 @@ bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t si
+@@ -190,9 +235,8 @@ bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t si
  static VkResult
  kgsl_bo_user_map(struct tu_device *dev, struct tu_bo *bo, uint64_t client_iova)
  {
 -   uint64_t offset = bo->gem_handle << 12;
-+   uint64_t offset = kgsl_mmap_offset(bo->gem_handle);
-    void *map = mmap(reinterpret_cast<void *>(client_iova), bo->size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED, dev->physical_device->local_fd, offset);
+-   void *map = mmap(reinterpret_cast<void *>(client_iova), bo->size, PROT_READ | PROT_WRITE,
+-                    MAP_SHARED, dev->physical_device->local_fd, offset);
++   void *map = kgsl_dev_mmap(reinterpret_cast<void *>(client_iova), bo->size, false,
++                             dev->physical_device->local_fd, bo->gem_handle);
     if (map == MAP_FAILED) {
-@@ -284,6 +299,14 @@ kgsl_bo_init(struct tu_device *dev,
+       kgsl_bo_finish(dev, bo);
+ 
+@@ -284,6 +328,14 @@ kgsl_bo_init(struct tu_device *dev,
               const char *name)
  {
     if (flags & TU_BO_ALLOC_SHAREABLE) {
@@ -91,7 +124,7 @@ index 5580ed8..ebf5700 100644
        /* The Vulkan spec doesn't forbid allocating exportable memory with a
         * fixed address, only imported memory, but on kgsl we can't sensibly
         * implement it so just always reject it.
-@@ -386,6 +409,11 @@ kgsl_bo_init_dmabuf(struct tu_device *dev,
+@@ -386,6 +438,11 @@ kgsl_bo_init_dmabuf(struct tu_device *dev,
                      enum tu_bo_alloc_flags flags,
                      int fd)
  {
@@ -103,16 +136,20 @@ index 5580ed8..ebf5700 100644
     struct kgsl_gpuobj_import_dma_buf import_dmabuf = {
        .fd = fd,
     };
-@@ -460,7 +488,7 @@ kgsl_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
+@@ -460,10 +517,8 @@ kgsl_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
  {
     void *map = MAP_FAILED;
     if (bo->shared_fd == -1) {
 -      uint64_t offset = bo->gem_handle << 12;
-+      uint64_t offset = kgsl_mmap_offset(bo->gem_handle);
+-      map = mmap(placed_addr, bo->size, PROT_READ | PROT_WRITE,
+-                 MAP_SHARED | (placed_addr != NULL ? MAP_FIXED : 0),
+-                 dev->physical_device->local_fd, offset);
++      map = kgsl_dev_mmap(placed_addr, bo->size, placed_addr != NULL,
++                          dev->physical_device->local_fd, bo->gem_handle);
+    } else {
        map = mmap(placed_addr, bo->size, PROT_READ | PROT_WRITE,
                   MAP_SHARED | (placed_addr != NULL ? MAP_FIXED : 0),
-                  dev->physical_device->local_fd, offset);
-@@ -778,6 +806,22 @@ kgsl_syncobj_dup(struct tu_device *device, const struct kgsl_syncobj *s, struct
+@@ -778,6 +833,22 @@ kgsl_syncobj_dup(struct tu_device *device, const struct kgsl_syncobj *s, struct
  static int
  timestamp_to_fd(struct tu_queue *queue, uint32_t timestamp)
  {
@@ -135,7 +172,7 @@ index 5580ed8..ebf5700 100644
     int fd;
     struct kgsl_timestamp_event event = {
        .type = KGSL_TIMESTAMP_EVENT_FENCE,
-@@ -926,7 +970,21 @@ kgsl_syncobj_wait(struct tu_device *device,
+@@ -926,7 +997,21 @@ kgsl_syncobj_wait(struct tu_device *device,
  
        pthread_mutex_lock(&device->submit_mutex);
        struct timespec abstime;
@@ -157,3 +194,24 @@ index 5580ed8..ebf5700 100644
  
        while (s->state == KGSL_SYNCOBJ_STATE_UNSIGNALED) {
           int ret;
+diff --git a/src/util/cache_ops_aarch64.c b/src/util/cache_ops_aarch64.c
+index d56ab8a..44921a2 100644
+--- a/src/util/cache_ops_aarch64.c
++++ b/src/util/cache_ops_aarch64.c
+@@ -29,9 +29,16 @@
+ static uint32_t
+ get_ctr_el0(void)
+ {
++#ifdef __APPLE__
++   /* TURNIP-IOS: xnu leaves SCTLR_EL1.UCT clear, so EL0 reads of CTR_EL0 trap (SIGILL in
++    * util_cache_granularity on the DM3Q). SM8550 cores (Cortex-X3/A715/A510) all have 64-byte
++    * lines: CWG = ERG = DminLine = IminLine = log2(16 words) = 4, L1Ip = PIPT. */
++   return (4u << 24) | (4u << 20) | (4u << 16) | (3u << 14) | 4u;
++#else
+    uint32_t ctr_el0;
+    __asm("mrs\t%x0, ctr_el0" : "=r"(ctr_el0));
+    return ctr_el0;
++#endif
+ }
+ 
+ static uint32_t

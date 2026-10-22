@@ -583,6 +583,18 @@
   WAIT/READTIMESTAMP, 1000 submit+wait round trips in 842 ms (1 ms polling waits: needs the CP interrupt later),
   64 MiB BO, FREE_ID, DRAWCTXT_DESTROY. NEXT: Mesa Turnip kgsl backend -> KGSL_IOS_MAP instead of mmap, then
   vulkaninfo / first triangle on the phone.
+  **Turnip on the phone (2026-10-22 ~00:30, vk_test via sweetrun, boot x26g / kernel 015):** Mesa patch (now in
+  tools/turnip-ios/mesa-turnip-ios.patch): KGSL_IOS_MAP instead of mmap; CTR_EL0 constant on Apple (EL0 read traps:
+  SIGILL in util_cache_granularity). Result: dlopen + vkCreateInstance OK, "Turnip Adreno (TM) 740" Vulkan 1.4.363,
+  heap 2022 MiB, vkCreateDevice OK, buffer/memory/map/cmdbuf OK, vkQueueSubmit OK, but the fence never signals
+  (vkCmdFillBuffer not done) and the CP stays stuck (vkDeviceWaitIdle hangs; reboot needed).
+  xnu 0114 (CI 39717010942, out-dm3q-016): submits wrapped like KGSL gen7 (THREAD_CONTROL BOTH/BR, IFPC + IB1LIST
+  markers, CCU invalidates), KGSL_IOS_REGS ioctl (read GPU regs from user space), hang log on wait timeout.
+  vk_test now dumps IB1/IB2/fault/status registers when the fence fails.
+  **NEXT (ready, not flashed):** Download Mode -> flash shim/out/dm3q-x27g-boot.img (gpuboot + payload x27s = kernel
+  016), cable in, wait for 192.168.7.2, `tools/sweetrun.py -f tools/kgsl-test/libvulkan_freedreno.dylib -f
+  tools/kgsl-test/vk_test vk_test` (signed copies there, not in git). If still stuck: read IB1/IB2 base vs Turnip's
+  BOs, consider FD_RD_DUMP cmdstream dump + cffdump, drawctxt switch / preamble IBs, BV thread / concurrent binning.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the

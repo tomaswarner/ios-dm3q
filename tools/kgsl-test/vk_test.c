@@ -10,6 +10,8 @@
  *        (the dylib lands next to it in /usr/local/sweettest/)
  */
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/ucontext.h>
@@ -21,6 +23,42 @@
 #include <vulkan/vulkan.h>
 
 static PFN_vkGetInstanceProcAddr gipa;
+
+/* xnu 0114 KGSL_IOS_REGS: GPU registers (dword offsets) on a separate /dev/kgsl-3d0 open */
+struct kgsl_ios_regs {
+	uint32_t n, off[32], val[32];
+};
+#define IOCTL_KGSL_IOS_REGS _IOWR(0x09, 0xe1, struct kgsl_ios_regs)
+
+static void
+dump_gpu(const char *why)
+{
+	static const struct { uint32_t off; const char *name; } r[] = {
+		{ 0x806, "RB_RPTR" }, { 0x807, "RB_WPTR" }, { 0x821, "HW_FAULT" }, { 0x823, "INT_STATUS" },
+		{ 0x824, "PROTECT_STATUS" }, { 0x825, "STATUS_1" }, { 0x928, "IB1_BASE" }, { 0x929, "IB1_BASE_HI" },
+		{ 0x92a, "IB1_REM" }, { 0x92b, "IB2_BASE" }, { 0x92c, "IB2_BASE_HI" }, { 0x92d, "IB2_REM" },
+		{ 0xa67, "IB3_BASE" }, { 0xa69, "IB3_REM" }, { 0xa61, "BV_PROTECT" }, { 0xa64, "BV_HW_FAULT" },
+		{ 0x201, "RBBM_INT0" }, { 0x210, "RBBM_STATUS" }, { 0x213, "RBBM_STATUS3" }, { 0x9b4, "RL_ERR0" },
+		{ 0x9cf, "RL_ERR1" }, { 0x980, "AON_LO" },
+	};
+	int fd = open("/dev/kgsl-3d0", O_RDWR);
+	struct kgsl_ios_regs q = { .n = sizeof(r) / sizeof(r[0]) };
+	for (uint32_t i = 0; i < q.n; i++) {
+		q.off[i] = r[i].off;
+	}
+	if (fd < 0 || ioctl(fd, IOCTL_KGSL_IOS_REGS, &q)) {
+		printf("     (no KGSL_IOS_REGS: kernel before 0114)\n");
+	} else {
+		printf("     GPU state (%s):\n", why);
+		for (uint32_t i = 0; i < q.n; i++) {
+			printf("       %-14s %08x%s", r[i].name, q.val[i], i % 3 == 2 ? "\n" : "");
+		}
+		printf("\n");
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+}
 static int fails;
 
 #define CHECK(cond, ...) do { \
@@ -209,6 +247,11 @@ main(int argc, char **argv)
 	r = vkWaitForFences(dev, 1, &fence, VK_TRUE, 2000000000ull);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	VKCHECK(r, "vkWaitForFences");
+	if (r) {
+		dump_gpu("fence not signalled");
+		fflush(stdout);
+		_exit(2);       /* the CP is stuck: vkDeviceWaitIdle would block forever */
+	}
 	printf("     submit -> fence: %.2f ms\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
 	uint32_t bad = 0;
 	for (uint32_t i = 0; i < size / 4; i++) {
