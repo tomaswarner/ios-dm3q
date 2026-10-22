@@ -441,7 +441,7 @@ void shim_main(uint64_t dtb)
 	touch_probe();		/* dm3q: STM touch over QUP1 SE4 SPI (build with DIAG=touch) */
 #elif defined(DIAG_USB)
 	usb_probe();		/* dm3q: USB state left by ABL, read only (build with DIAG=usb) */
-#elif defined(DIAG_GPU2) || defined(DIAG_GPU3)
+#elif defined(DIAG_GPU2) || defined(DIAG_GPU3) || defined(DIAG_GPU5)
 	gpu2_probe();		/* dm3q: Adreno 740 probe 2, GMU smmu context + boot (build with DIAG=gpu2) */
 #elif defined(DIAG_GPU)
 	gpu_probe();		/* dm3q: Adreno 740 probe 1, CX power + GMU TCM (build with DIAG=gpu) */

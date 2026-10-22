@@ -54,6 +54,7 @@
 #define GMU_FW_VERSION		0x03d74fe0UL	/* DTCM VA 0x10007fe0 */
 
 extern const uint8_t _gmu_fw_start[], _gmu_fw_end[];
+extern const uint8_t _sqe_fw_start[], _sqe_fw_end[];
 
 static inline uint32_t rd(uintptr_t a)
 {
@@ -484,6 +485,7 @@ void gpu_probe(void)
 static uintptr_t pgsz, cb_base, gr1;
 static uint32_t nums2cb, oas;
 static uint64_t carve_next;
+static uint64_t map_ap;		/* descriptor AP bits: 0 (GMU, privileged) or 1 << 6 (GPU, unprivileged too) */
 static uint64_t l1, l2[2];
 
 static void wr64(uintptr_t a, uint64_t v)
@@ -543,7 +545,7 @@ static uint64_t map(uint64_t va, uint64_t size)
 		 * a page writable unprivileged is implicitly PXN, and the GMU fetches privileged (gpu2 photo:
 		 * FSR 0x408 permission fault, FAR 0x4000, FSYNR0 0x63 = privileged instruction fetch, level 3).
 		 * Linux/KGSL map these regions IOMMU_PRIV. */
-		wr64(l3 + 8 * (((va + o) >> 12) & 0x1ff), pa | (1u << 10) | (3u << 8) | 3);
+		wr64(l3 + 8 * (((va + o) >> 12) & 0x1ff), pa | (1u << 10) | (3u << 8) | map_ap | 3);
 	}
 	return pa0;
 }
@@ -710,6 +712,168 @@ static void pll_config(uintptr_t b, uint32_t l, uint32_t alpha)
 	wr(b + 0x0, rd(b + 0x0) | 4u);
 }
 
+/* ---- probe 5 (DIAG=gpu5): GPU SMMU (SID 0), GX init, SQE, ring, CP_ME_INIT, first commands, no zap ----
+ * docs/dm3q/gpu/A740-STAGES-3PLUS.md sections 5-9 (Linux a6xx hw_init / KGSL gen7_start, gen7_rb_start). */
+
+#define GPU_SID		0
+#define VA_RING		0x10000000UL
+#define VA_MEMPTRS	0x10008000UL
+#define VA_PWRUP	0x10009000UL
+#define VA_SQE		0x1000b000UL
+#define VA_TEST		0x10020000UL
+#define CP_RB_RPTR	0x03d02018UL
+#define CP_RB_WPTR	0x03d0201cUL
+
+static void cp_dump(const char *why, uintptr_t cbp)
+{
+	con_str("CP DUMP", why);
+	con_hex2("CP", "hwfault=", rd(0x03d02084), "intstat=", rd(0x03d0208c));
+	con_hex2("CP", "protect=", rd(0x03d02090), "status1=", rd(0x03d02094));
+	con_hex2("RBBM", "status=", rd(0x03d00840), "int0=", rd(0x03d00804));
+	con_hex2("RBBM", "status3=", rd(0x03d0084c), "rptr=", rd(CP_RB_RPTR));
+	con_hex2("GPU SMMU", "fsr=", rd(cbp + CB_FSR), "far=", rd(cbp + CB_FAR));
+	con_hex2("GPU SMMU", "fsynr0=", rd(cbp + CB_FSYNR0), "gfsr=", rd(SMMU + SMMU_GFSR));
+}
+
+static int ring_submit(uint64_t ring, uint32_t *wptr, const uint32_t *cmds, uint32_t n, uintptr_t cbp)
+{
+	for (uint32_t i = 0; i < n; i++)
+		wr(ring + 4 * ((*wptr + i) % 8192), cmds[i]);
+	*wptr = (*wptr + n) % 8192;
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(CP_RB_WPTR, *wptr);
+	if (rd(0x03d8ec4c) & 1) {		/* AHB fence dropped the write: retry (Linux fenced write) */
+		udelay(100);
+		wr(CP_RB_WPTR, *wptr);
+	}
+	uint64_t t0 = ticks();
+	while (ticks() - t0 < 19200000ULL * 2) {
+		if (rd(CP_RB_RPTR) == *wptr && !(rd(0x03d00840) & ~1u))
+			return (int)((ticks() - t0) / 19200);
+	}
+	cp_dump("timeout", cbp);
+	return -1;
+}
+
+static void gpu5_cp(void)
+{
+	con_clear(0xff803000U);		/* page 5: brown */
+	con_str("GPU5 page 5", "GPU smmu + SQE + ring + first commands");
+
+	/* GPU page table: separate L1, unprivileged-accessible pages (GPU APRIV accesses are data) */
+	l1 = carve_page();
+	l2[0] = l2[1] = 0;
+	map_ap = 1u << 6;
+	uint64_t ring = map(VA_RING, 0x8000), mem = map(VA_MEMPTRS, 0x1000), pwr = map(VA_PWRUP, 0x2000);
+	uint64_t sqe = map(VA_SQE, 0x13000), test = map(VA_TEST, 0x1000);
+	(void)pwr;	/* power-up reglist left empty (fallback A): no preemption/IFPC here */
+	uint32_t sqe_bytes = (uint32_t)(_sqe_fw_end - _sqe_fw_start);
+	copy_words(sqe, _sqe_fw_start + 4, sqe_bytes - 4);	/* the microcode starts after the 4-byte header */
+	for (uint32_t o = 0; o < 0x1000; o += 4)
+		wr(test + o, 0xddddddddu);
+	con_hex2("P8 mem", "carve used=", (uint32_t)(carve_next - CARVE), "sqe w1=", rd(sqe));
+
+	/* context bank for SID 0: CB 0 (Linux gives the GPU CB 0), SCTLR | HUPCF */
+	con_str("NEXT", "P8 gpu smmu");
+	uint32_t cb = 0, slot = 1;
+	uintptr_t c = cb_base + cb * pgsz;
+	wr(c + CB_SCTLR, 0);
+	wr(gr1 + GR1_CBA2R(cb), 1);
+	wr(gr1 + GR1_CBAR(cb), (1u << 16) | (3u << 8) | (0xfu << 12) | (cb + 1));
+	wr(c + CB_TCR2, (oas < 2 ? oas : 2u) | (7u << 15));
+	wr(c + CB_TTBR0, (uint32_t)l1);
+	wr(c + CB_TTBR0 + 4, (uint32_t)(l1 >> 32));
+	wr(c + CB_TCR, 25u | (1u << 23));
+	wr(c + CB_MAIR0, 0x44);
+	wr(c + CB_MAIR1, 0);
+	wr(c + CB_FSR, rd(c + CB_FSR));
+	wr(c + CB_TLBIALL, 0);
+	wr(c + CB_TLBSYNC, 0);
+	(void)poll(c + CB_TLBSTATUS, 1, 0, 10000);
+	wr(c + CB_SCTLR, 1u | (1u << 1) | (1u << 2) | (1u << 5) | (1u << 8));	/* M TRE AFE CFRE HUPCF */
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(SMMU + SMMU_S2CR(slot), cb);
+	wr(SMMU + SMMU_SMR(slot), 0x80000000u | GPU_SID);
+	con_hex2("P8 CB0", "sctlr=", rd(c + CB_SCTLR), "smr1=", rd(SMMU + SMMU_SMR(slot)));
+
+	/* GX register init (STAGES-3PLUS s6, rows tagged R plus cheap S) */
+	con_str("NEXT", "P9 gx init");
+	wr(0x03d0f114, 0);			/* CX GBIF_HALT */
+	wr(0x03d00058, 0);			/* RBBM_GBIF_HALT */
+	wr(0x03d3e00c, 0);			/* RBBM_SECVID_TSB_CNTL */
+	wr(0x03d3e000, 0);
+	wr(0x03d3e004, 0);
+	wr(0x03d3e008, 0);			/* TSB trusted base/size */
+	wr(0x03d00044, 0x02120212u);		/* RBBM_GBIF_CLIENT_QOS_CNTL */
+	wr(0x03d038e8, 0x010240e0u);		/* UCHE_GBIF_GX_CONFIG */
+	wr(0x03d0142c, 0xffffffffu);		/* RBBM_PERFCTR_GPU_BUSY_MASKED */
+	wr(0x03d03824, 0xfffff000u);
+	wr(0x03d03828, 0x0001ffffu);		/* UCHE_TRAP_BASE */
+	wr(0x03d0381c, 0xfffff000u);
+	wr(0x03d03820, 0x0001ffffu);		/* UCHE_WRITE_THRU_BASE */
+	wr(0x03d0382c, 0x01000000u);
+	wr(0x03d03830, 0);			/* UCHE_GMEM_RANGE_MIN */
+	wr(0x03d03834, 0x012fffffu);
+	wr(0x03d03838, 0);			/* UCHE_GMEM_RANGE_MAX */
+	wr(0x03d0385c, 0x00800000u);		/* UCHE_CACHE_WAYS */
+	wr(0x03d02634, 1);			/* CP_AHB_CNTL */
+	wr(0x03d01400, 1);			/* RBBM_PERFCTR_CNTL */
+	wr(0x03d0007c, 0x40cfffffu);		/* RBBM_INTERFACE_HANG_INT_CNTL */
+	wr(0x03d03864, 0x00000081u);		/* UCHE_CLIENT_PF */
+	wr(0x03d038f0, 0x0006690eu);		/* UCHE_CMDQ_CONFIG */
+	wr(0x03d02110, 0x6f);			/* CP_APRIV_CNTL (BR) */
+	wr(0x03d02b40, 0x0f);			/* CP_BV_APRIV_CNTL */
+	wr(0x03d02104, 1);			/* CP_CHICKEN_DBG */
+	wr(0x03d02b68, 1);			/* CP_BV_CHICKEN_DBG */
+	wr(0x03d238a0, rd(0x03d238a0) | (1u << 11));	/* RB_CMP_DBG_ECO_CNTL */
+	wr(0x03d000e0, 0);			/* RBBM_INT_0_MASK: poll only */
+	con_hex2("P9 readback", "cacheways=", rd(0x03d0385c), "cmdq=", rd(0x03d038f0));
+
+	/* SQE + ring */
+	con_str("NEXT", "P10 sqe start");
+	wr(0x03d020c0, (uint32_t)VA_SQE);
+	wr(0x03d020c4, 0);			/* CP_SQE_INSTR_BASE */
+	wr(0x03d02000, (uint32_t)VA_RING);
+	wr(0x03d02004, 0);			/* CP_RB_BASE */
+	wr(0x03d02008, 0x0000020cu);		/* CP_RB_CNTL */
+	wr(0x03d02010, (uint32_t)VA_MEMPTRS);
+	wr(0x03d02014, 0);			/* CP_RB_RPTR_ADDR */
+	wr(0x03d02a60, (uint32_t)(VA_MEMPTRS + 8));
+	wr(0x03d02a64, 0);			/* CP_BV_RB_RPTR_ADDR */
+	__asm__ volatile("dsb sy" ::: "memory");
+	uint32_t aon0 = rd(0x03d02600);
+	wr(0x03d02020, 1);			/* CP_SQE_CNTL: start */
+	udelay(1000);
+	con_hex2("P10 SQE", "status1=", rd(0x03d02094), "aon delta=", rd(0x03d02600) - aon0);
+	con_hex2("P10 SQE", "hwfault=", rd(0x03d02084), "rptr=", rd(CP_RB_RPTR));
+
+	/* CP_ME_INIT (gen7, 10 dwords; pwrup list empty) */
+	con_str("NEXT", "P11 ME_INIT");
+	static const uint32_t me_init[10] = { 0x70970001, 0x08000000, 0x70c80007, 0x0000014b, 0x00000003,
+					      0x20000000, 0x00000002, (uint32_t)VA_PWRUP, 0, 0x80000000 };
+	uint32_t wptr = 0;
+	int ms = ring_submit(ring, &wptr, me_init, 10, c);
+	con_hex2("P11 ME_INIT", "ms=", (uint32_t)ms, "rptr=", rd(CP_RB_RPTR));
+	if (ms < 0) {
+		con_str("GPU5 RESULT", "ME_INIT did not complete");
+		return;
+	}
+
+	/* first commands: A = PKT4 CP_SCRATCH(2), B = CP_MEM_WRITE + cache clean fence (no zap) */
+	con_str("NEXT", "P12 test cmds");
+	static const uint32_t cmds[13] = { 0x48088501, 0xc0de0001, 0x703d8003, (uint32_t)VA_TEST, 0, 0xcafef00du,
+					   0x70928000, 0x70460004, 0x08000031, (uint32_t)(VA_MEMPTRS + 4), 0, 1, 0x70268000 };
+	ms = ring_submit(ring, &wptr, cmds, 13, c);
+	con_hex2("P12 cmds", "ms=", (uint32_t)ms, "scratch2=", rd(0x03d02214));
+	con_hex2("P12 mem", "test=", rd(test), "fence=", rd(mem + 4));
+	con_hex2("P12 mem", "rptr shadow=", rd(mem), "secvid=", rd(0x03d3d000));
+	int ok = rd(0x03d02214) == 0xc0de0001u, memok = rd(test) == 0xcafef00du;
+	con_str("GPU5 RESULT", ok ? (memok ? "CP runs: reg + memory write OK" : "CP runs: reg OK, memory write not seen")
+				  : "CP did not execute the test");
+	if (!memok)
+		cp_dump("after test", c);
+}
+
 static void gpu4_gx_on(void)
 {
 	con_hex2("P6 PLL0", "mode=", rd(GPUCC + 0x0), "l=", rd(GPUCC + 0x10));
@@ -747,6 +911,9 @@ static void gpu4_gx_on(void)
 	con_hex2("P7 CP", "status1=", rd(0x03d02094), "hwfault=", rd(0x03d02094 - 0x10));	/* CP_STATUS_1, CP_HW_FAULT 0x03d02084 */
 	con_hex2("P7 CP", "aon ctr=", rd(0x03d02600), "intstat=", rd(0x03d0208c));		/* CP_ALWAYS_ON_COUNTER, CP_INTERRUPT_STATUS */
 	con_str("GPU4 RESULT", "GX ON at 220 MHz (OOB held)");
+#if defined(DIAG_GPU5)
+	gpu5_cp();
+#endif
 	/* drop the OOB: the GMU may collapse GX again; the M3 is put back in reset by the caller */
 	wr(HOST2GMU_INTR_SET, 1u << 31);
 }
@@ -1040,7 +1207,7 @@ void gpu2_probe(void)
 		uint32_t us = poll(0x03d7e600, 1, 1, 50000);
 		con_hex2("P5 HFI", "status=", rd(0x03d7e600), "us=", us);
 		results[0] = us != ~0u ? 'o' : 'X';
-#if defined(DIAG_GPU3)
+#if defined(DIAG_GPU3) || defined(DIAG_GPU5)
 		if (us != ~0u) {
 			hfi_pa = hfi;
 			gpu3_hfi();
