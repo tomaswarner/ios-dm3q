@@ -1,0 +1,978 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 3a59fa1..f8d2391 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -114,6 +114,7 @@ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/sweet_thermal.c			standard
+ bsd/dev/sweet_gpu.c			standard
++bsd/dev/sweet_kgsl.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index fcd995f..07f9b45 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -9,9 +9,9 @@
+  *
+  * This file takes the running CP over: it checks the handoff, then submits
+  * CP_MEM_WRITE + cache-clean fence packets on the shim's ring from xnu and
+- * checks that they land, once at boot and every 10 s for a minute (the GPU
+- * must survive iOS starting up). Lines "SWEET GPU" in the console log.
+- * Boot-arg sweetgpu=0: off.
++ * checks that they land (0111: 7/7 over a minute while iOS boots), then
++ * starts /dev/kgsl-3d0 (sweet_kgsl.c) on the same ring. Lines "SWEET GPU" in
++ * the console log. Boot-arg sweetgpu=0: off; sweetgpu=2: ping only, no kgsl.
+  *
+  * Handoff layout (u64 words, shim/gpu.c handoff_write): 0 magic "SGPUA740",
+  * 1 version, 2 CB page pa, 3 GPU L1 table pa, 4 shim carve-out next free pa,
+@@ -30,10 +30,20 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
++#include <kern/locks.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+ void sweet_gpu_start(void);
++extern void sweet_kgsl_init(void);
++uint64_t sweet_gpu_ho(unsigned i);
++vm_offset_t sweet_gpu_map(uint64_t pa, uint64_t size);
++int sweet_gpu_ring_write(const uint32_t *cmds, uint32_t n);
++bool sweet_gpu_idle(void);
++uint32_t sweet_gpu_reg(uint32_t off);
++
++static LCK_GRP_DECLARE(sg_grp, "sweet_gpu");
++static LCK_MTX_DECLARE(sg_ring_mtx, &sg_grp);    /* ring contents, wptr */
+ 
+ #define HANDOFF_PA      0x9c0100000ULL
+ #define HANDOFF_MAGIC   0x3034374155504753ULL   /* "SGPUA740" */
+@@ -56,6 +66,7 @@ void sweet_gpu_start(void);
+ 
+ static struct {
+ 	bool started;
++	int mode;
+ 	vm_offset_t ho, regs, gmu, ring, mem, test;
+ 	uint64_t ring_va, mem_va, test_va;
+ 	uint32_t ring_dw, wptr, seq;
+@@ -85,20 +96,9 @@ gmu_rd(uint32_t pa)
+ 	return rd(g.gmu + (pa - GMU_PA));
+ }
+ 
+-static int g_sleep_chan;
+-
+-static void
+-g_sleep(unsigned ms)
+-{
+-	uint64_t deadline;
+-	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+-	(void)assert_wait_deadline(&g_sleep_chan, THREAD_UNINT, deadline);
+-	thread_block(THREAD_CONTINUE_NULL);
+-}
+-
+ /* map [pa, pa + size) (any alignment) uncached; returns the va of pa, 0 on failure */
+-static vm_offset_t
+-map_pa(uint64_t pa, uint64_t size)
++vm_offset_t
++sweet_gpu_map(uint64_t pa, uint64_t size)
+ {
+ 	uint64_t base = pa & ~(uint64_t)(MAP_PAGE - 1);
+ 	uint64_t len = (pa + size - base + MAP_PAGE - 1) & ~(uint64_t)(MAP_PAGE - 1);
+@@ -106,10 +106,43 @@ map_pa(uint64_t pa, uint64_t size)
+ 	return va ? va + (vm_offset_t)(pa - base) : 0;
+ }
+ 
+-/* copy cmds into the ring, bump WPTR, wait up to 1 s for RPTR == WPTR and an idle RBBM; returns us or -1 */
+-static int
+-submit(const uint32_t *cmds, uint32_t n)
++uint64_t
++sweet_gpu_ho(unsigned i)
++{
++	return ho(i);
++}
++
++uint32_t
++sweet_gpu_reg(uint32_t off)
++{
++	return rd(g.regs + off);
++}
++
++bool
++sweet_gpu_idle(void)
+ {
++	return rd(g.regs + CP_RB_RPTR) == g.wptr && !(rd(g.regs + RBBM_STATUS) & ~1u);
++}
++
++/* append cmds to the ring and bump WPTR (no wait for completion); waits up to 2 s for ring space.
++ * 0 or ENOSPC (the CP is not consuming: hung). */
++int
++sweet_gpu_ring_write(const uint32_t *cmds, uint32_t n)
++{
++	int err = 0;
++	lck_mtx_lock(&sg_ring_mtx);
++	for (int us = 0;; us += 50) {
++		uint32_t rptr = rd(g.regs + CP_RB_RPTR);
++		uint32_t used = (g.wptr + g.ring_dw - rptr) % g.ring_dw;
++		if (used + n + 16u < g.ring_dw) {
++			break;
++		}
++		if (us >= 2000000) {
++			err = ENOSPC;
++			goto out;
++		}
++		delay(50);
++	}
+ 	for (uint32_t i = 0; i < n; i++) {
+ 		wr(g.ring + 4u * ((g.wptr + i) % g.ring_dw), cmds[i]);
+ 	}
+@@ -120,6 +153,18 @@ submit(const uint32_t *cmds, uint32_t n)
+ 		delay(100);
+ 		wr(g.regs + CP_RB_WPTR, g.wptr);
+ 	}
++out:
++	lck_mtx_unlock(&sg_ring_mtx);
++	return err;
++}
++
++/* copy cmds into the ring, bump WPTR, wait up to 1 s for RPTR == WPTR and an idle RBBM; returns us or -1 */
++static int
++submit(const uint32_t *cmds, uint32_t n)
++{
++	if (sweet_gpu_ring_write(cmds, n)) {
++		return -1;
++	}
+ 	for (int us = 0; us < 1000000; us += 10) {
+ 		if (rd(g.regs + CP_RB_RPTR) == g.wptr && !(rd(g.regs + RBBM_STATUS) & ~1u)) {
+ 			return us;
+@@ -157,16 +202,16 @@ gpu_thread(void *arg, wait_result_t result)
+ {
+ 	(void)arg;
+ 	(void)result;
+-	g.ho = map_pa(HANDOFF_PA, MAP_PAGE);
++	g.ho = sweet_gpu_map(HANDOFF_PA, MAP_PAGE);
+ 	if (!g.ho || ho(0) != HANDOFF_MAGIC || ho(1) != 1) {
+ 		printf("SWEET GPU: no handoff from the shim (magic %llx): GPU not started\n", g.ho ? ho(0) : 0);
+ 		goto out;
+ 	}
+-	g.regs = map_pa(ho(22), ho(23));
+-	g.gmu = map_pa(GMU_PA, GMU_SIZE);
+-	g.ring = map_pa(ho(12), ho(14));
+-	g.mem = map_pa(ho(15), 0x1000);
+-	g.test = map_pa(ho(19), 0x1000);
++	g.regs = sweet_gpu_map(ho(22), ho(23));
++	g.gmu = sweet_gpu_map(GMU_PA, GMU_SIZE);
++	g.ring = sweet_gpu_map(ho(12), ho(14));
++	g.mem = sweet_gpu_map(ho(15), 0x1000);
++	g.test = sweet_gpu_map(ho(19), 0x1000);
+ 	g.ring_va = ho(13);
+ 	g.mem_va = ho(16);
+ 	g.test_va = ho(20);
+@@ -186,12 +231,12 @@ gpu_thread(void *arg, wait_result_t result)
+ 		printf("SWEET GPU: rptr != handoff wptr: not touching the ring\n");
+ 		goto out;
+ 	}
+-	unsigned ok = 0;
+-	for (unsigned i = 0; i < 7; i++) {
+-		ok += ping(i ? "alive" : "first") ? 1u : 0u;
+-		g_sleep(10000);
++	if (!ping("first")) {
++		goto out;
++	}
++	if (g.mode != 2) {
++		sweet_kgsl_init();
+ 	}
+-	printf("SWEET GPU: %u/7 submits from xnu landed\n", ok);
+ out:
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
+@@ -207,6 +252,7 @@ sweet_gpu_start(void)
+ 	}
+ 	g.started = true;
+ 	(void)PE_parse_boot_argn("sweetgpu", &mode, sizeof(mode));
++	g.mode = mode;
+ 	if (mode == 0) {
+ 		printf("SWEET GPU: off (sweetgpu=0)\n");
+ 		return;
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+new file mode 100644
+index 0000000..95a3633
+--- /dev/null
++++ b/bsd/dev/sweet_kgsl.c
+@@ -0,0 +1,752 @@
++/*
++ * DM3Q (Galaxy S23 Ultra) /dev/kgsl-3d0: the subset of Qualcomm's KGSL
++ * interface that Mesa Turnip uses (port/docs/dm3q/gpu/TURNIP-IOS.md section 4),
++ * on the Adreno 740 that sweet_gpu.c took over from the shim.
++ *
++ * Memory: the shim leaves DDR 0x9_c0200000.. (handoff words 10/11, about
++ * 1 GiB, above xnu's RAM, never managed by the VM) to us. All of it is mapped
++ * once into the GPU page table (handoff word 3 = L1) at GPU VA 0x1_00000000
++ * with 2 MiB blocks (one L2 table), so a buffer's GPU address is fixed by its
++ * physical address and allocating or freeing never touches the SMMU. The
++ * first 2 MiB block holds that L2 table (+0) and the memstore (+0x4000:
++ * 16 bytes per context, retired timestamp at +0). Buffers are 16 KiB pages
++ * from the rest (first fit, physically contiguous), mapped into the caller
++ * write-combined through a device pager + named entry (what IOKit does for
++ * physical ranges) by the private ioctl KGSL_IOS_MAP (mmap() of a character
++ * device is ENODEV in xnu; KGSL-XNU-DESIGN.md phase 1).
++ *
++ * Submission: one ring (the shim's), in order. GPU_COMMAND appends one
++ * CP_INDIRECT_BUFFER per IB and a CACHE_CLEAN event that writes the
++ * context's timestamp into the memstore; waits poll it. Syncpoints need no
++ * work (everything retires in submission order).
++ *
++ * Not yet: GPU isolation between processes (every buffer is visible to
++ * every GPU job), interrupts (waits poll every 1 ms), hang recovery,
++ * cached/coherent memory, USE_CPU_MAP, sparse buffers.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/conf.h>
++#include <sys/ioccom.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/clock.h>
++#include <kern/kalloc.h>
++#include <kern/locks.h>
++#include <kern/sched_prim.h>
++#include <kern/thread.h>
++#include <mach/vm_prot.h>
++#include <vm/vm_map.h>
++#include <vm/vm_protos.h>
++#include <machine/machine_routines.h>
++#include <libkern/libkern.h>
++
++#ifndef VM_WIMG_WCOMB
++#define VM_WIMG_WCOMB           0x6             /* osfmk/arm/memory_types.h */
++#endif
++#ifndef DEVICE_PAGER_CONTIGUOUS
++#define DEVICE_PAGER_CONTIGUOUS 0x100           /* osfmk/device/device_port.h */
++#endif
++
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
++extern void ml_io_unmap(vm_offset_t, vm_size_t);
++extern uint64_t sweet_gpu_ho(unsigned i);
++extern vm_offset_t sweet_gpu_map(uint64_t pa, uint64_t size);
++extern int sweet_gpu_ring_write(const uint32_t *cmds, uint32_t n);
++extern bool sweet_gpu_idle(void);
++extern uint32_t sweet_gpu_reg(uint32_t off);
++void sweet_kgsl_init(void);
++
++/* ---- KGSL ABI (Mesa src/freedreno/vulkan/msm_kgsl.h; LP64 layouts) ---- */
++struct kgsl_devinfo {
++	uint32_t device_id, chip_id, mmu_enabled;
++	uint64_t gmem_gpubaseaddr;
++	uint32_t gpu_id;
++	uint64_t gmem_sizebytes;
++};
++struct kgsl_device_getproperty {
++	uint32_t type;
++	uint64_t value;         /* user pointer */
++	uint64_t sizebytes;
++};
++struct kgsl_device_waittimestamp_ctxtid {
++	uint32_t context_id, timestamp, timeout;
++};
++struct kgsl_drawctxt_create {
++	uint32_t flags, drawctxt_id;
++};
++struct kgsl_drawctxt_destroy {
++	uint32_t drawctxt_id;
++};
++struct kgsl_cmdstream_readtimestamp_ctxtid {
++	uint32_t context_id, type, timestamp;
++};
++struct kgsl_gpumem_alloc_id {
++	uint32_t id, flags;
++	uint64_t size, mmapsize, gpuaddr, pad[2];
++};
++struct kgsl_gpumem_free_id {
++	uint32_t id, pad;
++};
++struct kgsl_gpumem_get_info {
++	uint64_t gpuaddr;
++	uint32_t id, flags;
++	uint64_t size, mmapsize, useraddr, pad[4];
++};
++struct kgsl_command_object {
++	uint64_t offset, gpuaddr, size;
++	uint32_t flags, id;
++};
++struct kgsl_gpu_command {
++	uint64_t flags, cmdlist;
++	uint32_t cmdsize, numcmds;
++	uint64_t objlist;
++	uint32_t objsize, numobjs;
++	uint64_t synclist;
++	uint32_t syncsize, numsyncs, context_id, timestamp;
++};
++/* ours: map buffer `id` into the caller (flags bit 0: at `addr`, replacing what is there) */
++struct kgsl_ios_map {
++	uint32_t id, flags;
++	uint64_t addr, size;
++};
++
++_Static_assert(sizeof(struct kgsl_devinfo) == 40, "kgsl_devinfo");
++_Static_assert(sizeof(struct kgsl_device_getproperty) == 24, "getproperty");
++_Static_assert(sizeof(struct kgsl_gpumem_alloc_id) == 48, "alloc_id");
++_Static_assert(sizeof(struct kgsl_gpumem_get_info) == 72, "get_info");
++_Static_assert(sizeof(struct kgsl_command_object) == 32, "command_object");
++_Static_assert(sizeof(struct kgsl_gpu_command) == 64, "gpu_command");
++
++#define KGSL_IOC        0x09
++#define IOCTL_KGSL_DEVICE_GETPROPERTY           _IOWR(KGSL_IOC, 0x02, struct kgsl_device_getproperty)
++#define IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID  _IOW(KGSL_IOC, 0x07, struct kgsl_device_waittimestamp_ctxtid)
++#define IOCTL_KGSL_DRAWCTXT_CREATE              _IOWR(KGSL_IOC, 0x13, struct kgsl_drawctxt_create)
++#define IOCTL_KGSL_DRAWCTXT_DESTROY             _IOW(KGSL_IOC, 0x14, struct kgsl_drawctxt_destroy)
++#define IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID _IOWR(KGSL_IOC, 0x16, struct kgsl_cmdstream_readtimestamp_ctxtid)
++#define IOCTL_KGSL_GPUMEM_ALLOC_ID              _IOWR(KGSL_IOC, 0x34, struct kgsl_gpumem_alloc_id)
++#define IOCTL_KGSL_GPUMEM_FREE_ID               _IOWR(KGSL_IOC, 0x35, struct kgsl_gpumem_free_id)
++#define IOCTL_KGSL_GPUMEM_GET_INFO              _IOWR(KGSL_IOC, 0x36, struct kgsl_gpumem_get_info)
++#define IOCTL_KGSL_GPU_COMMAND                  _IOWR(KGSL_IOC, 0x4a, struct kgsl_gpu_command)
++#define IOCTL_KGSL_IOS_MAP                      _IOWR(KGSL_IOC, 0xe0, struct kgsl_ios_map)
++
++#define KGSL_PROP_DEVICE_INFO           0x01
++#define KGSL_PROP_GPU_RESET_STAT        0x09
++#define KGSL_PROP_UCHE_GMEM_VADDR       0x13
++#define KGSL_PROP_HIGHEST_BANK_BIT      0x17
++#define KGSL_PROP_UBWC_MODE             0x1b
++#define KGSL_PROP_GPU_VA64_SIZE         0x2c
++#define KGSL_PROP_IS_RAYTRACING_ENABLED 0x2d
++#define KGSL_PROP_UCHE_TRAP_BASE        0x2f
++
++#define KGSL_MEMFLAGS_GPUREADONLY       (1u << 24)
++#define KGSL_CACHEMODE_MASK             (3u << 26)
++#define KGSL_MEMFLAGS_USE_CPU_MAP       (1u << 28)
++#define KGSL_MEMFLAGS_IOCOHERENT        (1u << 31)
++#define KGSL_MEMALIGN_SHIFT             16
++#define KGSL_MEMALIGN_MASK              (0xffu << KGSL_MEMALIGN_SHIFT)
++#define KGSL_CMDLIST_IB                 0x1
++
++/* ---- A740 facts (TURNIP-IOS.md 4.2; GMEM range and trap base as the shim programs them) ---- */
++#define A740_CHIP_ID            0x43050a01u
++#define A740_GMEM_BASE          0x01000000ull   /* UCHE_GMEM_RANGE_MIN, shim/gpu.c gpu5_cp */
++#define A740_GMEM_SIZE          0x00300000ull
++#define A740_TRAP_BASE          0x1fffffffff000ull
++
++#define POOL_GPUVA      0x100000000ull
++#define BLOCK           0x200000ull
++#define MEMSTORE_OFF    0x4000u
++#define BO_PAGE         0x4000ull               /* 16 KiB: the user page size */
++#define MAX_BO          4096
++#define MAX_CTX         256
++#define MAX_OPEN        64
++#define MAX_IB          64
++#define PKT7(op, cnt)   (0x70000000u | ((uint32_t)(cnt) & 0x3fffu) | (parity((uint32_t)(cnt)) << 15) | \
++	                 (((uint32_t)(op) & 0x7fu) << 16) | (parity((uint32_t)(op)) << 23))
++#define CP_INDIRECT_BUFFER      0x3f
++#define CP_EVENT_WRITE          0x46
++#define EV_CACHE_CLEAN_TS       0x08000031u     /* CACHE_CLEAN | timestamp (0111 pings) */
++#define CP_HW_FAULT             0x02084u
++
++struct kbo {
++	bool used;
++	int owner;
++	uint64_t pa, size;
++	memory_object_t pager;
++	ipc_port_t entry;
++};
++struct kctx {
++	bool used;
++	int owner;
++	uint32_t ts;
++};
++
++static struct {
++	bool up;
++	int major;
++	uint64_t pool, pool_size, data_pa;
++	uint32_t npages;
++	vm_offset_t blk0;               /* kernel mapping of the first block (L2 table, memstore) */
++	uint64_t *bitmap;               /* one bit per 16 KiB data page */
++	bool open[MAX_OPEN];
++	struct kbo bo[MAX_BO];
++	struct kctx ctx[MAX_CTX];
++} k;
++
++static LCK_GRP_DECLARE(kgsl_grp, "sweet_kgsl");
++static LCK_MTX_DECLARE(kgsl_mtx, &kgsl_grp);
++
++static uint32_t
++parity(uint32_t v)
++{
++	v ^= v >> 16;
++	v ^= v >> 8;
++	v ^= v >> 4;
++	return (0x9669u >> (v & 0xfu)) & 1u;    /* odd parity bit (Linux pm4_calc_odd_parity_bit) */
++}
++
++static void
++wr32(vm_offset_t a, uint32_t v)
++{
++	*(volatile uint32_t *)a = v;
++}
++
++static uint32_t
++rd32(vm_offset_t a)
++{
++	return *(volatile uint32_t *)a;
++}
++
++static void
++wr64(vm_offset_t a, uint64_t v)
++{
++	*(volatile uint64_t *)a = v;
++}
++
++static uint64_t
++rd64(vm_offset_t a)
++{
++	return *(volatile uint64_t *)a;
++}
++
++static uint32_t
++retired(unsigned ctx)
++{
++	return rd32(k.blk0 + MEMSTORE_OFF + 16u * ctx);
++}
++
++static bool
++ts_ge(uint32_t a, uint32_t b)
++{
++	return (int32_t)(a - b) >= 0;
++}
++
++/* ---- page allocator over the data region (first fit, aligned) ---- */
++static bool
++page_used(uint32_t p)
++{
++	return (k.bitmap[p / 64] >> (p % 64)) & 1u;
++}
++
++static void
++pages_mark(uint32_t first, uint32_t n, bool used)
++{
++	for (uint32_t p = first; p < first + n; p++) {
++		if (used) {
++			k.bitmap[p / 64] |= 1ull << (p % 64);
++		} else {
++			k.bitmap[p / 64] &= ~(1ull << (p % 64));
++		}
++	}
++}
++
++static int64_t
++pages_alloc(uint32_t n, uint32_t align_pages)
++{
++	for (uint32_t p = 0; p + n <= k.npages; p += align_pages) {
++		uint32_t i;
++		for (i = 0; i < n && !page_used(p + i); i++) {
++		}
++		if (i == n) {
++			pages_mark(p, n, true);
++			return p;
++		}
++	}
++	return -1;
++}
++
++/* ---- buffers ---- */
++static void
++bo_release(struct kbo *b)
++{
++	pages_mark((uint32_t)((b->pa - k.data_pa) / BO_PAGE), (uint32_t)(b->size / BO_PAGE), false);
++	if (b->entry != IPC_PORT_NULL) {
++		mach_memory_entry_port_release(b->entry);
++	}
++	if (b->pager != MEMORY_OBJECT_NULL) {
++		device_pager_deallocate(b->pager);
++	}
++	bzero(b, sizeof(*b));
++}
++
++static void
++gpu_drain(void)
++{
++	for (int ms = 0; ms < 2000 && !sweet_gpu_idle(); ms++) {
++		delay(1000);
++	}
++}
++
++static int
++bo_alloc(int owner, struct kgsl_gpumem_alloc_id *a)
++{
++	if (a->flags & KGSL_MEMFLAGS_USE_CPU_MAP) {
++		return EINVAL;          /* Turnip: has_set_iova = false */
++	}
++	uint64_t size = (a->size + BO_PAGE - 1) & ~(BO_PAGE - 1);
++	if (!size || size > k.pool_size) {
++		return ENOMEM;
++	}
++	uint32_t align = 1;
++	unsigned shift = (a->flags & KGSL_MEMALIGN_MASK) >> KGSL_MEMALIGN_SHIFT;
++	if (shift > 14 && shift <= 21) {
++		align = 1u << (shift - 14);
++	}
++	lck_mtx_lock(&kgsl_mtx);
++	int id = -1;
++	for (int i = 0; i < MAX_BO && id < 0; i++) {
++		if (!k.bo[i].used) {
++			id = i;
++		}
++	}
++	int64_t p = id < 0 ? -1 : pages_alloc((uint32_t)(size / BO_PAGE), align);
++	if (p < 0) {
++		lck_mtx_unlock(&kgsl_mtx);
++		return ENOMEM;
++	}
++	struct kbo *b = &k.bo[id];
++	b->used = true;
++	b->owner = owner;
++	b->pa = k.data_pa + (uint64_t)p * BO_PAGE;
++	b->size = size;
++	lck_mtx_unlock(&kgsl_mtx);
++
++	/* zero it (KGSL does; Turnip relies on zeroed BOs) */
++	vm_offset_t z = ml_io_map_wcomb((vm_offset_t)b->pa, (vm_size_t)size);
++	if (!z) {
++		goto fail;
++	}
++	bzero((void *)z, (size_t)size);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	ml_io_unmap(z, (vm_size_t)size);
++
++	b->pager = device_pager_setup(MEMORY_OBJECT_NULL, 0, (vm_size_t)size, DEVICE_PAGER_CONTIGUOUS | VM_WIMG_WCOMB);
++	if (b->pager == MEMORY_OBJECT_NULL ||
++	    device_pager_populate_object(b->pager, 0, (ppnum_t)atop_64(b->pa), (vm_size_t)size) != KERN_SUCCESS ||
++	    mach_memory_object_memory_entry_64((host_t)1, false, size, VM_PROT_READ | VM_PROT_WRITE, b->pager,
++	    &b->entry) != KERN_SUCCESS) {
++		goto fail;
++	}
++	a->id = (uint32_t)id + 1;
++	a->flags &= ~(KGSL_CACHEMODE_MASK | KGSL_MEMFLAGS_IOCOHERENT);  /* write-combined only */
++	a->mmapsize = size;
++	a->gpuaddr = POOL_GPUVA + (b->pa - k.pool);
++	return 0;
++fail:
++	lck_mtx_lock(&kgsl_mtx);
++	bo_release(b);
++	lck_mtx_unlock(&kgsl_mtx);
++	return ENOMEM;
++}
++
++static struct kbo *
++bo_get(int owner, uint32_t id)
++{
++	if (id == 0 || id > MAX_BO || !k.bo[id - 1].used || k.bo[id - 1].owner != owner) {
++		return NULL;
++	}
++	return &k.bo[id - 1];
++}
++
++static int
++bo_free(int owner, uint32_t id)
++{
++	gpu_drain();            /* the GPU may still read it: wait for the ring to empty */
++	lck_mtx_lock(&kgsl_mtx);
++	struct kbo *b = bo_get(owner, id);
++	if (b) {
++		bo_release(b);
++	}
++	lck_mtx_unlock(&kgsl_mtx);
++	return b ? 0 : EINVAL;
++}
++
++static int
++bo_map(int owner, struct kgsl_ios_map *m)
++{
++	/* the lock (a sleepable mutex) keeps the entry alive across the map */
++	lck_mtx_lock(&kgsl_mtx);
++	struct kbo *b = bo_get(owner, m->id);
++	if (!b || b->entry == IPC_PORT_NULL) {
++		lck_mtx_unlock(&kgsl_mtx);
++		return EINVAL;
++	}
++	uint64_t size = b->size;
++	vm_map_offset_t addr = (vm_map_offset_t)m->addr;
++	vm_map_kernel_flags_t f = (m->flags & 1) ? VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true)
++	    : VM_MAP_KERNEL_FLAGS_ANYWHERE();
++	kern_return_t kr = vm_map_enter_mem_object(current_map(), &addr, size, 0, f, b->entry, 0, FALSE,
++	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_SHARE);
++	lck_mtx_unlock(&kgsl_mtx);
++	if (kr != KERN_SUCCESS) {
++		return kr == KERN_NO_SPACE || kr == KERN_INVALID_ADDRESS ? ENOMEM : EINVAL;
++	}
++	m->addr = addr;
++	m->size = size;
++	return 0;
++}
++
++/* ---- contexts and submission ---- */
++static struct kctx *
++ctx_get(int owner, uint32_t id)
++{
++	if (id == 0 || id > MAX_CTX || !k.ctx[id - 1].used || k.ctx[id - 1].owner != owner) {
++		return NULL;
++	}
++	return &k.ctx[id - 1];
++}
++
++static int
++ctx_create(int owner, struct kgsl_drawctxt_create *c)
++{
++	lck_mtx_lock(&kgsl_mtx);
++	for (unsigned i = 0; i < MAX_CTX; i++) {
++		if (!k.ctx[i].used) {
++			k.ctx[i].used = true;
++			k.ctx[i].owner = owner;
++			k.ctx[i].ts = retired(i);       /* continue from what the memstore holds */
++			c->drawctxt_id = i + 1;
++			lck_mtx_unlock(&kgsl_mtx);
++			return 0;
++		}
++	}
++	lck_mtx_unlock(&kgsl_mtx);
++	return ENOMEM;
++}
++
++static int
++ctx_destroy(int owner, uint32_t id)
++{
++	lck_mtx_lock(&kgsl_mtx);
++	struct kctx *c = ctx_get(owner, id);
++	if (c) {
++		c->used = false;
++	}
++	lck_mtx_unlock(&kgsl_mtx);
++	return c ? 0 : EINVAL;
++}
++
++static int
++gpu_command(int owner, struct kgsl_gpu_command *cmd)
++{
++	uint32_t pkt[4 * MAX_IB + 8], n = 0;
++	struct kgsl_command_object obj;
++	if (cmd->numcmds > MAX_IB || (cmd->numcmds && cmd->cmdsize < sizeof(obj))) {
++		return EINVAL;
++	}
++	for (uint32_t i = 0; i < cmd->numcmds; i++) {
++		int err = copyin((user_addr_t)(cmd->cmdlist + (uint64_t)i * cmd->cmdsize), &obj, sizeof(obj));
++		if (err) {
++			return err;
++		}
++		if (!(obj.flags & KGSL_CMDLIST_IB) || !obj.size) {
++			continue;
++		}
++		pkt[n++] = PKT7(CP_INDIRECT_BUFFER, 3);
++		pkt[n++] = (uint32_t)obj.gpuaddr;
++		pkt[n++] = (uint32_t)(obj.gpuaddr >> 32);
++		pkt[n++] = (uint32_t)(obj.size / 4);
++	}
++	lck_mtx_lock(&kgsl_mtx);
++	struct kctx *c = ctx_get(owner, cmd->context_id);
++	if (!c) {
++		lck_mtx_unlock(&kgsl_mtx);
++		return EINVAL;
++	}
++	uint32_t ts = ++c->ts;
++	uint64_t ms = POOL_GPUVA + MEMSTORE_OFF + 16ull * (cmd->context_id - 1);
++	pkt[n++] = PKT7(CP_EVENT_WRITE, 4);
++	pkt[n++] = EV_CACHE_CLEAN_TS;
++	pkt[n++] = (uint32_t)ms;
++	pkt[n++] = (uint32_t)(ms >> 32);
++	pkt[n++] = ts;
++	int err = sweet_gpu_ring_write(pkt, n);         /* under kgsl_mtx: ring order == timestamp order */
++	lck_mtx_unlock(&kgsl_mtx);
++	if (err) {
++		printf("SWEET KGSL: ring full (CP hung?), hw fault %x\n", sweet_gpu_reg(CP_HW_FAULT));
++		return EPROTO;
++	}
++	cmd->timestamp = ts;
++	return 0;
++}
++
++static int kgsl_sleep_chan;
++
++static int
++wait_ts(int owner, struct kgsl_device_waittimestamp_ctxtid *w)
++{
++	if (!ctx_get(owner, w->context_id)) {
++		return EINVAL;
++	}
++	unsigned ctx = w->context_id - 1;
++	for (uint32_t ms = 0;; ms++) {
++		if (ts_ge(retired(ctx), w->timestamp)) {
++			return 0;
++		}
++		if (sweet_gpu_reg(CP_HW_FAULT)) {
++			printf("SWEET KGSL: GPU fault %x waiting for ctx %u ts %u (at %u)\n",
++			    sweet_gpu_reg(CP_HW_FAULT), w->context_id, w->timestamp, retired(ctx));
++			return EPROTO;
++		}
++		if (ms >= w->timeout) {
++			return ETIMEDOUT;
++		}
++		uint64_t deadline;
++		clock_interval_to_deadline(1, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&kgsl_sleep_chan, THREAD_ABORTSAFE, deadline);
++		if (thread_block(THREAD_CONTINUE_NULL) == THREAD_INTERRUPTED) {
++			return EINTR;
++		}
++	}
++}
++
++/* ---- properties ---- */
++static int
++prop_out(struct kgsl_device_getproperty *p, const void *v, size_t len)
++{
++	if (p->sizebytes != len) {
++		return EINVAL;
++	}
++	return copyout(v, (user_addr_t)p->value, len);
++}
++
++static int
++getproperty(struct kgsl_device_getproperty *p)
++{
++	uint32_t u32;
++	uint64_t u64;
++	switch (p->type) {
++	case KGSL_PROP_DEVICE_INFO: {
++		struct kgsl_devinfo d = {
++			.device_id = 0, .chip_id = A740_CHIP_ID, .mmu_enabled = 1,
++			.gmem_gpubaseaddr = A740_GMEM_BASE, .gpu_id = 740, .gmem_sizebytes = A740_GMEM_SIZE,
++		};
++		return prop_out(p, &d, sizeof(d));
++	}
++	case KGSL_PROP_GPU_RESET_STAT:
++		u32 = 0;        /* KGSL_CTX_STAT_NO_ERROR */
++		return prop_out(p, &u32, sizeof(u32));
++	case KGSL_PROP_UCHE_GMEM_VADDR:
++		u64 = A740_GMEM_BASE;
++		return prop_out(p, &u64, sizeof(u64));
++	case KGSL_PROP_HIGHEST_BANK_BIT:
++		u32 = 16;
++		return prop_out(p, &u32, sizeof(u32));
++	case KGSL_PROP_UBWC_MODE:
++		u32 = 4;        /* KGSL_UBWC_4_0 */
++		return prop_out(p, &u32, sizeof(u32));
++	case KGSL_PROP_GPU_VA64_SIZE:
++		u64 = k.pool_size - BLOCK;      /* caps Turnip's heap at what we can allocate */
++		return prop_out(p, &u64, sizeof(u64));
++	case KGSL_PROP_IS_RAYTRACING_ENABLED:
++		u32 = 0;
++		return prop_out(p, &u32, sizeof(u32));
++	case KGSL_PROP_UCHE_TRAP_BASE:
++		u64 = A740_TRAP_BASE;
++		return prop_out(p, &u64, sizeof(u64));
++	default:
++		return EINVAL;
++	}
++}
++
++/* ---- cdev ---- */
++static int
++kgsl_open(dev_t dev, __unused int flags, __unused int devtype, __unused proc_t p)
++{
++	return k.up && minor(dev) < MAX_OPEN ? 0 : ENXIO;
++}
++
++static int
++kgsl_close(dev_t dev, __unused int flags, __unused int mode, __unused proc_t p)
++{
++	int owner = minor(dev);
++	gpu_drain();
++	lck_mtx_lock(&kgsl_mtx);
++	for (int i = 0; i < MAX_BO; i++) {
++		if (k.bo[i].used && k.bo[i].owner == owner) {
++			bo_release(&k.bo[i]);
++		}
++	}
++	for (int i = 0; i < MAX_CTX; i++) {
++		if (k.ctx[i].used && k.ctx[i].owner == owner) {
++			k.ctx[i].used = false;
++		}
++	}
++	if (owner < MAX_OPEN) {
++		k.open[owner] = false;
++	}
++	lck_mtx_unlock(&kgsl_mtx);
++	return 0;
++}
++
++/* devfs clone: a new minor (and vnode) per open, so close() is per open and owns its buffers */
++static int
++kgsl_clone(__unused dev_t dev, int action)
++{
++	if (action != DEVFS_CLONE_ALLOC) {
++		return -1;
++	}
++	lck_mtx_lock(&kgsl_mtx);
++	for (int i = 0; i < MAX_OPEN; i++) {
++		if (!k.open[i]) {
++			k.open[i] = true;
++			lck_mtx_unlock(&kgsl_mtx);
++			return i;
++		}
++	}
++	lck_mtx_unlock(&kgsl_mtx);
++	return -1;
++}
++
++static int
++kgsl_ioctl(dev_t dev, u_long cmd, caddr_t data, __unused int fflag, __unused proc_t p)
++{
++	int owner = minor(dev);
++	switch (cmd) {
++	case IOCTL_KGSL_DEVICE_GETPROPERTY:
++		return getproperty((struct kgsl_device_getproperty *)data);
++	case IOCTL_KGSL_DRAWCTXT_CREATE:
++		return ctx_create(owner, (struct kgsl_drawctxt_create *)data);
++	case IOCTL_KGSL_DRAWCTXT_DESTROY:
++		return ctx_destroy(owner, ((struct kgsl_drawctxt_destroy *)data)->drawctxt_id);
++	case IOCTL_KGSL_GPUMEM_ALLOC_ID:
++		return bo_alloc(owner, (struct kgsl_gpumem_alloc_id *)data);
++	case IOCTL_KGSL_GPUMEM_FREE_ID:
++		return bo_free(owner, ((struct kgsl_gpumem_free_id *)data)->id);
++	case IOCTL_KGSL_GPUMEM_GET_INFO: {
++		struct kgsl_gpumem_get_info *gi = (struct kgsl_gpumem_get_info *)data;
++		lck_mtx_lock(&kgsl_mtx);
++		struct kbo *b = bo_get(owner, gi->id);
++		if (b) {
++			gi->gpuaddr = POOL_GPUVA + (b->pa - k.pool);
++			gi->size = gi->mmapsize = b->size;
++			gi->flags = 0;
++			gi->useraddr = 0;
++		}
++		lck_mtx_unlock(&kgsl_mtx);
++		return b ? 0 : EINVAL;
++	}
++	case IOCTL_KGSL_GPU_COMMAND:
++		return gpu_command(owner, (struct kgsl_gpu_command *)data);
++	case IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID: {
++		struct kgsl_cmdstream_readtimestamp_ctxtid *r = (struct kgsl_cmdstream_readtimestamp_ctxtid *)data;
++		if (!ctx_get(owner, r->context_id)) {
++			return EINVAL;
++		}
++		r->timestamp = retired(r->context_id - 1);
++		return 0;
++	}
++	case IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID:
++		return wait_ts(owner, (struct kgsl_device_waittimestamp_ctxtid *)data);
++	case IOCTL_KGSL_IOS_MAP:
++		return bo_map(owner, (struct kgsl_ios_map *)data);
++	default:
++		return ENOTTY;  /* GPUOBJ_*, BIND_RANGES, AUX_COMMAND, TIMESTAMP_EVENT: Turnip falls back */
++	}
++}
++
++static const struct cdevsw kgsl_cdevsw = {
++	.d_open       = kgsl_open,
++	.d_close      = kgsl_close,
++	.d_read       = eno_rdwrt,
++	.d_write      = eno_rdwrt,
++	.d_ioctl      = kgsl_ioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = 0
++};
++
++/* ---- init: GPU mapping of the pool, self-test through it, device node ---- */
++void
++sweet_kgsl_init(void)
++{
++	k.pool = sweet_gpu_ho(10);
++	k.pool_size = sweet_gpu_ho(11) & ~(BLOCK - 1);
++	if ((k.pool & (BLOCK - 1)) || k.pool_size < 4 * BLOCK) {
++		printf("SWEET KGSL: bad pool %llx +%llx\n", k.pool, k.pool_size);
++		return;
++	}
++	k.data_pa = k.pool + BLOCK;
++	k.npages = (uint32_t)((k.pool_size - BLOCK) / BO_PAGE);
++	k.blk0 = sweet_gpu_map(k.pool, BLOCK);
++	vm_offset_t l1 = sweet_gpu_map(sweet_gpu_ho(3), 0x1000);
++	vm_offset_t cb = sweet_gpu_map(sweet_gpu_ho(2), 0x1000);
++	k.bitmap = (uint64_t *)kalloc_data((k.npages + 63) / 64 * 8, Z_WAITOK | Z_ZERO);
++	if (!k.blk0 || !l1 || !cb || !k.bitmap) {
++		printf("SWEET KGSL: mapping/alloc failed\n");
++		return;
++	}
++	unsigned i1 = (unsigned)((POOL_GPUVA >> 30) & 0x1ff);
++	if (rd64(l1 + 8u * i1) & 1u) {
++		printf("SWEET KGSL: GPU L1[%u] already used (%llx)\n", i1, rd64(l1 + 8u * i1));
++		return;
++	}
++	/* L2 at the start of block 0: 2 MiB blocks, AF | inner shareable | AP=01 (GPU data) | AttrIndx 0 (NC) */
++	for (unsigned i = 0; i < 512; i++) {
++		uint64_t pa = k.pool + (uint64_t)i * BLOCK;
++		wr64(k.blk0 + 8u * i, (uint64_t)i * BLOCK < k.pool_size ?
++		    (pa | (1u << 10) | (3u << 8) | (1u << 6) | 1u) : 0);
++	}
++	for (unsigned c = 0; c < MAX_CTX; c++) {
++		wr32(k.blk0 + MEMSTORE_OFF + 16u * c, 0);
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	wr64(l1 + 8u * i1, k.pool | 3u);                /* table descriptor */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	wr32(cb + 0x618, 0);                            /* CB_TLBIALL */
++	wr32(cb + 0x7f0, 0);                            /* CB_TLBSYNC */
++	for (int us = 0; us < 10000 && (rd32(cb + 0x7f4) & 1u); us++) {
++		delay(1);
++	}
++
++	/* self-test: the CP writes through the new mapping (memstore slot of the last context) */
++	uint64_t va = POOL_GPUVA + MEMSTORE_OFF + 16ull * (MAX_CTX - 1) + 8;
++	const uint32_t t[5] = { 0x703d8003u, (uint32_t)va, (uint32_t)(va >> 32), 0x6b65736cu, 0x70928000u };
++	int err = sweet_gpu_ring_write(t, 5);
++	gpu_drain();
++	uint32_t got = rd32(k.blk0 + MEMSTORE_OFF + 16u * (MAX_CTX - 1) + 8);
++	printf("SWEET KGSL: pool %llx +%llu MiB at gpu va %llx, %u pages; CP write through it: %x (%s)\n",
++	    k.pool, k.pool_size >> 20, POOL_GPUVA, k.npages, got,
++	    !err && got == 0x6b65736cu ? "ok" : "FAILED");
++	if (err || got != 0x6b65736cu) {
++		return;
++	}
++	k.major = cdevsw_add(-1, &kgsl_cdevsw);
++	if (k.major < 0) {
++		printf("SWEET KGSL: cdevsw_add failed\n");
++		return;
++	}
++	k.up = true;
++	(void)devfs_make_node_clone(makedev(k.major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, kgsl_clone,
++	    "kgsl-3d0");
++	printf("SWEET KGSL: /dev/kgsl-3d0 up (major %d)\n", k.major);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/IOMemoryDescriptor.cpp b/iokit/Kernel/IOMemoryDescriptor.cpp
+index 4d96763..097f6c5 100644
+--- a/iokit/Kernel/IOMemoryDescriptor.cpp
++++ b/iokit/Kernel/IOMemoryDescriptor.cpp
+@@ -223,6 +223,9 @@ device_data_action(
+ 	IOMemoryDescriptorReserved * ref = (IOMemoryDescriptorReserved *) device_handle;
+ 	OSSharedPtr<IOMemoryDescriptor> memDesc;
+ 
++	if (ref == NULL) {      /* SWEET: fully populated pager made outside IOKit: nothing to fault in */
++		return KERN_ABORTED;
++	}
+ 	LOCK;
+ 	if (ref->dp.memory) {
+ 		memDesc.reset(ref->dp.memory, OSRetain);
+@@ -242,6 +245,9 @@ device_close(
+ {
+ 	IOMemoryDescriptorReserved * ref = (IOMemoryDescriptorReserved *) device_handle;
+ 
++	if (ref == NULL) {      /* SWEET: device pagers made outside IOKit (bsd/dev/sweet_kgsl.c) */
++		return kIOReturnSuccess;
++	}
+ 	IOFreeType( ref, IOMemoryDescriptorReserved );
+ 
+ 	return kIOReturnSuccess;
