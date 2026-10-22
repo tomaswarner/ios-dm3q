@@ -482,6 +482,7 @@ void gpu_probe(void)
 #define HFI_SIZE	0x4000UL
 
 static uintptr_t pgsz, cb_base, gr1;
+static uint32_t nums2cb, oas;
 static uint64_t carve_next;
 static uint64_t l1, l2[2];
 
@@ -500,6 +501,11 @@ static uint64_t rd64(uintptr_t a)
 static uint64_t carve_page(void)
 {
 	uint64_t p = carve_next;
+	if (p + 0x1000 > CARVE + CARVE_SIZE) {
+		con_str("GPU2", "carve overflow: stop");
+		for (;;)
+			__asm__ volatile("wfe");
+	}
 	carve_next += 0x1000;
 	for (uint64_t o = 0; o < 0x1000; o += 8)
 		wr64(p + o, 0);
@@ -523,14 +529,15 @@ static uint64_t l3_for(uint64_t va)
 	return d & 0xfffffffff000ULL;
 }
 
-/* map [va, va+size) to fresh zeroed pages; returns the PA of the first page (pages are consecutive) */
+/* map [va, va+size) to fresh zeroed, physically consecutive pages; returns the first PA. The
+ * L2/L3 tables are made first so no table page lands between the data pages (review finding 1). */
 static uint64_t map(uint64_t va, uint64_t size)
 {
-	uint64_t pa0 = 0;
+	for (uint64_t o = 0; o < size; o += 0x1000)
+		(void)l3_for(va + o);
+	uint64_t pa0 = carve_next;
 	for (uint64_t o = 0; o < size; o += 0x1000) {
 		uint64_t pa = carve_page();
-		if (!o)
-			pa0 = pa;
 		uint64_t l3 = l3_for(va + o);
 		/* page: AF, inner shareable, AP 01 (RW any EL), AttrIndx 0 (MAIR0 attr0) */
 		wr64(l3 + 8 * (((va + o) >> 12) & 0x1ff), pa | (1u << 10) | (3u << 8) | (1u << 6) | 3);
@@ -559,6 +566,13 @@ static int smmu_survey(uint32_t *nsmr, uint32_t *ncb)
 	*nsmr = idr0 & 0xff;
 	*ncb = idr1 & 0xff;
 	con_hex2("P1 SMMU", "nsmr=", *nsmr, "ncb=", *ncb);
+	nums2cb = (idr1 >> 16) & 0xff;
+	oas = (idr2 >> 4) & 0xf;
+	con_hex2("P1 caps", "s1ts/sms/4k=", ((idr0 >> 30) & 1) << 8 | ((idr0 >> 27) & 1) << 4 | ((idr2 >> 12) & 1), "nums2cb/oas=", nums2cb << 16 | oas);
+	if (!((idr0 >> 30) & 1) || !((idr2 >> 12) & 1)) {
+		con_str("P1", "no stage 1 or no 4K granule");
+		return 0;
+	}
 	con_hex2("P1 SMMU", "pgsz=", (uint32_t)pgsz, "cbbase=", (uint32_t)cb_base);
 	/* valid SMRs, compactly: index<<16 | id, with S2CR */
 	unsigned shown = 0;
@@ -591,6 +605,33 @@ static void hfi_table(uint64_t pa)
 	}
 }
 
+/* RSC/PDC sequencer microcode, KGSL gen7_load_rsc_ucode / gen7_load_pdc_ucode (A740 values), between
+ * GMU start and HFI start (review finding 4; docs/dm3q/gpu/PROBE2-REVIEW.md) */
+static void gpu2_rsc_pdc(void)
+{
+	const uintptr_t R = 0x03d50000UL, P = 0x0b280000UL;
+	wr(R + 0x10, 1u << 24);			/* RSC_STATUS0_DRV0: disable SDE clock gating */
+	wr(R + 0x2c, 1);			/* PDC_SLAVE_ID_DRV0 */
+	wr(R + 0x38, 0);
+	wr(R + 0x34, 0);			/* HIDDEN_TCS_CMD0 DATA / ADDR */
+	wr(R + 0x40, 0);
+	wr(R + 0x3c, 0);
+	wr(R + 0x48, 0x80000021u);
+	wr(R + 0x44, 0);
+	wr(R + 0x400, 0);			/* OVERRIDE_START_ADDR */
+	wr(R + 0x20, 0x4520);			/* PDC_SEQ_START_ADDR */
+	wr(R + 0x24, 0x4510);			/* PDC_MATCH_VALUE_LO */
+	wr(R + 0x28, 0x4514);			/* PDC_MATCH_VALUE_HI */
+	wr(R + 0x550, 0xeaaae5a0u);		/* SEQ_MEM_0_DRV0 (A740) */
+	wr(R + 0x554, 0xe1a1ebabu);
+	wr(R + 0x558, 0xa2e0a581u);
+	wr(R + 0x55c, 0xecac82e2u);
+	wr(R + 0x560, 0x0020edadu);
+	wr(P + 0x4520, 0);			/* PDC_GPU_SEQ_START_ADDR */
+	wr(P + 0x4500, 0x80000001u);		/* PDC_GPU_ENABLE_PDC */
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
 void gpu2_probe(void)
 {
 	for (int i = 0; i < 12; i++)
@@ -602,6 +643,8 @@ void gpu2_probe(void)
 	s6_cx_gdsc();
 	s7_gmu_clocks();
 	s9_tcm();
+	uint32_t g_memnoc = rd(GCC_GPU_MEMNOC_GFX), g_axi = rd(GCC_DDRSS_GPU_AXI);
+	uint32_t g_dvm = rd(GCC_GPU_SNOC_DVM_GFX), g_cfg = rd(GCC_GPU_CFG_AHB);
 	char l1s[16] = "S1..9 ";
 	for (int i = 1; i <= 9; i++)
 		l1s[5 + i] = results[i];
@@ -609,6 +652,8 @@ void gpu2_probe(void)
 	con_clear(BLUE);
 	con_str("GPU2 page 2", "power + TCM (o = ok)");
 	con_str("GPU2 S1-9", l1s);
+	con_hex2("P0 GCC", "memnoc=", g_memnoc, "axi=", g_axi);
+	con_hex2("P0 GCC", "dvm=", g_dvm, "cfgahb=", g_cfg);
 	if (results[6] != 'o' || results[9] != 'o') {
 		con_str("GPU2", "power/TCM failed: stop");
 		return;
@@ -621,7 +666,7 @@ void gpu2_probe(void)
 	}
 	/* a context bank nobody uses, an SMR slot (reuse one already matching SID 5) */
 	uint32_t cb = ~0u, slot = ~0u;
-	for (uint32_t c = ncb; c-- > 0;)
+	for (uint32_t c = ncb; c-- > nums2cb;)
 		if (!(rd(cb_base + c * pgsz + CB_SCTLR) & 1)) {
 			int used = 0;
 			for (uint32_t n = 0; n < nsmr && n < 128; n++) {
@@ -634,12 +679,17 @@ void gpu2_probe(void)
 			}
 		}
 	for (uint32_t n = 0; n < nsmr && n < 128 && slot == ~0u; n++)
-		if ((rd(SMMU + SMMU_SMR(n)) & 0x80007fffu) == (0x80000000u | GMU_SID))
+		if (rd(SMMU + SMMU_SMR(n)) == (0x80000000u | GMU_SID))
 			slot = n;
 	for (uint32_t n = 0; n < nsmr && n < 128 && slot == ~0u; n++)
 		if (!(rd(SMMU + SMMU_SMR(n)) >> 31))
 			slot = n;
 	con_hex2("P2 pick", "cb=", cb, "smr slot=", slot);
+	for (uint32_t n = 0; n < nsmr && n < 128; n++) {	/* other SMRs that also match SID 5 (multi-match) */
+		uint32_t smr = rd(SMMU + SMMU_SMR(n)), m = (smr >> 16) & 0x7fff, id = smr & 0x7fff;
+		if (n != slot && (smr >> 31) && (((id ^ GMU_SID) & ~m & 0x7fff) == 0))
+			con_hex2("P2 SMR conflict", "n=", n, "smr=", smr);
+	}
 	if (cb == ~0u || slot == ~0u)
 		return;
 
@@ -652,7 +702,8 @@ void gpu2_probe(void)
 	(void)map(0x100000, 0x9000);
 	(void)map(0x200000, 0x13000);
 	(void)map(0x300000, 0x1c000);
-	(void)map(0x60000000, 0x2000);
+	(void)map(0x60000000, 0x4000);	/* fw PERSIST x2 (Linux a7xx dummy is 16 KiB) */
+	(void)map(0x60400000, 0x7000);	/* Linux a7xx debug region */
 	uint64_t log = map(VA_LOG, LOG_SIZE);
 	uint64_t hfi = map(VA_HFI, HFI_SIZE);
 	/* the firmware's DDR block {0x4000, 0x10210} */
@@ -670,6 +721,7 @@ void gpu2_probe(void)
 		f += 16 + size;
 	}
 	hfi_table(hfi);
+	__asm__ volatile("dsb sy" ::: "memory");
 	con_hex2("P2 carve", "used=", (uint32_t)(carve_next - CARVE), "code bytes=", copied);
 	con_hex2("P2 code", "w0=", rd(code), "l1[0]=", (uint32_t)rd64(l1));
 
@@ -679,13 +731,12 @@ void gpu2_probe(void)
 	wr(c + CB_SCTLR, 0);
 	wr(gr1 + GR1_CBA2R(cb), 1);				/* VA64 */
 	wr(gr1 + GR1_CBAR(cb), (1u << 16) | (3u << 8) | (0xfu << 12) | (cb + 1));	/* S1 trans, S2 bypass */
-	wr(c + CB_TCR2, (2u << 0) | (7u << 15));		/* PASize 40-bit, SEP upstream */
+	wr(c + CB_TCR2, (oas < 2 ? oas : 2u) | (7u << 15));	/* PASize min(40-bit, OAS), SEP upstream */
 	wr(c + CB_TTBR0, (uint32_t)l1);
 	wr(c + CB_TTBR0 + 4, (uint32_t)(l1 >> 32));
 	wr(c + CB_TCR, 25u | (1u << 23));			/* T0SZ 25, TG0 4K, NC walks, EPD1 */
 	wr(c + CB_MAIR0, 0x44);					/* attr0 normal non-cacheable */
 	wr(c + CB_MAIR1, 0);
-	wr(c + CB_ACTLR, 0x32b);				/* DT qcom,actlr for kgsl-smmu */
 	wr(c + CB_FSR, rd(c + CB_FSR));				/* clear stale faults */
 	wr(c + CB_TLBIALL, 0);
 	wr(c + CB_TLBSYNC, 0);
@@ -693,15 +744,37 @@ void gpu2_probe(void)
 	wr(c + CB_SCTLR, 1u | (1u << 1) | (1u << 2) | (1u << 5));	/* M, TRE, AFE, CFRE */
 	wr(SMMU + SMMU_S2CR(slot), cb & 0xff);			/* translate through cb */
 	wr(SMMU + SMMU_SMR(slot), 0x80000000u | GMU_SID);
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(SMMU + SMMU_GFSR, rd(SMMU + SMMU_GFSR));		/* clear stale global faults */
+	uint32_t cr0b = rd(SMMU + SMMU_CR0);
+	if (cr0b & 1u)						/* CLIENTPD: every stream would bypass */
+		wr(SMMU + SMMU_CR0, cr0b & ~1u);
 	uint32_t cr0 = rd(SMMU + SMMU_CR0);
+	con_hex2("P2 sCR0", "before=", cr0b, "after=", cr0);
 	con_hex2("P2 CB", "sctlr=", rd(c + CB_SCTLR), "tlbsync us=", tus);
 	con_hex2("P2 SMR", "smr=", rd(SMMU + SMMU_SMR(slot)), "s2cr=", rd(SMMU + SMMU_S2CR(slot)));
 	con_hex2("P2 SMMU", "cr0=", cr0, "cbar=", rd(gr1 + GR1_CBAR(cb)));
 	step(10, rd(c + CB_SCTLR) & 1);
 
+	/* page 3 (the console clips at the bottom) */
+	{
+		uint32_t sctlr = rd(c + CB_SCTLR), smr = rd(SMMU + SMMU_SMR(slot));
+		con_clear(0xff004000U);
+		con_str("GPU2 page 3", "GMU boot (page 2: smmu)");
+		con_hex2("P2 summary", "cb/slot=", cb << 16 | slot, "sctlr=", sctlr);
+		con_hex2("P2 summary", "smr=", smr, "cr0=", rd(SMMU + SMMU_CR0));
+	}
 	/* GMU register setup [KGSL gen7_gmu_register_config / Linux a6xx_gmu_fw_start] */
 	con_str("NEXT", "P3 gmu config");
+	wr(0x03d7e000, 1);			/* SYSRESET held (Linux a6xx_gmu_start) */
 	wr(0x03d9e0e4, 1);			/* CX_MISC TCM_RET_CNTL */
+	/* fw prealloc ranges inside the TCMs, zeroed (outside the loaded blocks) */
+	for (uintptr_t a = GMU_ITCM + 0x200; a < GMU_ITCM + 0x3cdc; a += 4)
+		wr(a, 0);
+	for (uintptr_t a = GMU_DTCM; a < GMU_DTCM + 0x2ee0; a += 4)
+		wr(a, 0);
+	for (uintptr_t a = GMU_DTCM + 0x3000; a < GMU_DTCM + 0x3f84; a += 4)
+		wr(a, 0);
 	wr(0x03d7e3c4, 1);			/* GMU_CM3_FALNEXT_INTF */
 	wr(0x03d7e3c0, 1);			/* GMU_CM3_FAL_INTF */
 	wr(0x03d7e070, 0);			/* FW_INIT_RESULT */
@@ -722,17 +795,18 @@ void gpu2_probe(void)
 
 	/* release the M3 and wait for init done [(FW_INIT_RESULT & 0x1ff) == 0x100] */
 	con_str("NEXT", "P4 gmu release");
+	__asm__ volatile("dsb sy" ::: "memory");
 	wr(0x03d7e000, 0);
 	uint64_t t0 = ticks();
 	uint32_t res = 0, seen = 0, last = ~0u;
-	while (ticks() - t0 < 19200000ULL / 2) {	/* 500 ms */
+	while (ticks() - t0 < 19200000ULL * 2) {	/* 2 s: the GMU runs on XO (19.2 MHz), drivers use 200 MHz */
 		res = rd(0x03d7e070);
 		if (res != last && seen < 6) {
 			con_hex2("P4 initres", "val=", res, "ms=", (uint32_t)((ticks() - t0) / 19200));
 			seen++;
 			last = res;
 		}
-		if ((res & 0x1ff) == 0x100)
+		if ((res & 0x1ff) == 0x100 || (res & 0xe00))	/* done, or fw assertion/NMI (KGSL) */
 			break;
 	}
 	int init_ok = (res & 0x1ff) == 0x100;
@@ -740,7 +814,10 @@ void gpu2_probe(void)
 	con_hex2("P4 gmu", "fwbusy=", rd(0x03d7e068), "g2h=", rd(0x03d7e648));
 	con_hex2("P4 smmu", "fsr=", rd(c + CB_FSR), "far=", rd(c + CB_FAR));
 	con_hex2("P4 smmu", "farhi=", rd(c + CB_FAR + 4), "fsynr0=", rd(c + CB_FSYNR0));
+	con_hex2("P4 smmu", "gfsr=", rd(SMMU + SMMU_GFSR), "gfsynr0=", rd(SMMU + 0x50));
 	if (init_ok) {
+		con_str("NEXT", "P5 rsc/pdc");
+		gpu2_rsc_pdc();
 		con_str("NEXT", "P5 hfi start");
 		wr(0x03d7e618, 1);		/* HFI_CTRL_INIT */
 		uint32_t us = poll(0x03d7e600, 1, 1, 50000);
