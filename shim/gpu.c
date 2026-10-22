@@ -608,6 +608,150 @@ static void hfi_table(uint64_t pa)
 	}
 }
 
+/* ---- probe 3 (DIAG=gpu3): HFI messages after HFI_CTRL_INIT (docs/dm3q/gpu/A740-STAGES-3PLUS.md s3) ---- */
+
+#define HOST2GMU_INTR_SET	0x03d7e650UL
+#define GMU2HOST_INTR_CLR	0x03d7e644UL
+#define GMU2HOST_INTR_INFO	0x03d7e648UL
+#define QSIZE			0x400u		/* dwords per queue */
+
+static uint64_t hfi_pa;
+static uint32_t hfi_seq;
+
+static uintptr_t qhdr(int q)
+{
+	return hfi_pa + 24 + 48 * q;	/* {status, iova, type, size, msg_size, dropped, rx_wm, tx_wm, rx_req, tx_req, read, write} */
+}
+
+static uintptr_t qdata(int q)
+{
+	return hfi_pa + 0x1000 * (q + 1);
+}
+
+/* send one command (msg[0] = header filled here) and wait for its ack; returns the ack's error word, or ~0u */
+static uint32_t hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords, uint32_t *ack_payload0)
+{
+	uint32_t seq = ++hfi_seq & 0xfff;
+	msg[0] = seq << 20 | 0u << 16 | dwords << 8 | id;
+	uint32_t w = rd(qhdr(0) + 44), aligned = (dwords + 3) & ~3u;
+	for (uint32_t i = 0; i < aligned; i++)
+		wr(qdata(0) + 4 * ((w + i) % QSIZE), i < dwords ? msg[i] : 0xfafafafau);
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(qhdr(0) + 44, (w + aligned) % QSIZE);
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HOST2GMU_INTR_SET, 1);
+	/* wait for the ack (id 126) carrying our header; drain anything else */
+	uint64_t t0 = ticks();
+	while (ticks() - t0 < 19200000ULL) {	/* 1 s */
+		uint32_t r = rd(qhdr(1) + 40), wi = rd(qhdr(1) + 44);
+		if (r == wi) {
+			if (rd(GMU2HOST_INTR_INFO) & (1u << 23)) {
+				con_hex2("HFI", "CM3 FAULT info=", rd(GMU2HOST_INTR_INFO), "initres=", rd(0x03d7e070));
+				return ~0u;
+			}
+			continue;
+		}
+		uint32_t h = rd(qdata(1) + 4 * r), sz = (h >> 8) & 0xff, mid = h & 0xff;
+		uint32_t d1 = rd(qdata(1) + 4 * ((r + 1) % QSIZE)), d2 = rd(qdata(1) + 4 * ((r + 2) % QSIZE));
+		uint32_t d3 = rd(qdata(1) + 4 * ((r + 3) % QSIZE));
+		wr(qhdr(1) + 40, ((r + sz + 3) & ~3u) % QSIZE);
+		wr(GMU2HOST_INTR_CLR, 1);
+		if (mid == 126 && (d1 >> 20) == seq) {
+			if (ack_payload0)
+				*ack_payload0 = d3;
+			con_hex2("HFI ack", "id/seq=", id << 16 | seq, "err/pl0=", (d2 & 0xffff) << 16 | (d3 & 0xffff));
+			return d2;
+		}
+		con_hex2("HFI other", "hdr=", h, "d1=", d1);	/* F2H_MSG_ERR 100 / DEBUG 101 / LOG 102 */
+	}
+	con_hex2("HFI timeout", "id=", id, "info=", rd(GMU2HOST_INTR_INFO));
+	return ~0u;
+}
+
+/* ARC vote word: vlvl<<16 | sec_idx<<8 | pri_idx (KGSL ARC_VOTE_SET, Linux a6xx_gmu_rpmh_arc_votes_init) */
+static uint32_t arc_vote(const struct arc *pri, const struct arc *sec, uint32_t vlvl)
+{
+	int p = -1, q = -1;
+	for (int k = 0; k < pri->n && p < 0; k++)
+		if (pri->level[k] >= vlvl)
+			p = k;
+	if (p < 0)
+		return 0;
+	for (int k = 0; k < sec->n && q < 0; k++)
+		if (sec->level[k] >= pri->level[p])
+			q = k;
+	if (q < 0)
+		q = sec->n - 1;
+	return vlvl << 16 | (uint32_t)q << 8 | (uint32_t)p;
+}
+
+static void gpu3_hfi(void)
+{
+	static uint32_t m[160];
+	struct arc *cx = &arcs[0], *mx = &arcs[1], *gfx = &arcs[3];
+	int ok = 1;
+	con_clear(0xff400040U);		/* page 4: purple */
+	con_str("GPU3 page 4", "HFI messages (GX stays off)");
+	wr(GMU2HOST_INTR_CLR, ~0u);
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	/* 1. PERF_TABLE (id 4, 59 dwords): GX off/220/295/348 MHz (cap: no thermal driver), GMU off/220/550 */
+	static const uint32_t gx_khz[4] = { 0, 220000, 295000, 348000 }, gx_lvl[4] = { 0, 52, 56, 60 };
+	for (int i = 0; i < 59; i++)
+		m[i] = 0;
+	m[1] = 4;
+	m[2] = 3;
+	for (int i = 0; i < 4; i++) {
+		m[3 + 3 * i] = i ? arc_vote(gfx, mx, gx_lvl[i]) : 0;
+		m[4 + 3 * i] = 0xffffffffu;	/* acd: none */
+		m[5 + 3 * i] = gx_khz[i];
+	}
+	m[51] = 0;
+	m[52] = 0;				/* cx_votes[0] off */
+	m[53] = arc_vote(cx, mx, 64);
+	m[54] = 220000;
+	m[55] = arc_vote(cx, mx, 128);
+	m[56] = 550000;
+	con_hex2("PERF gx", "v1=", m[6], "v3=", m[12]);
+	con_hex2("PERF cx", "v1=", m[53], "v2=", m[55]);
+	ok &= m[6] && m[12] && m[53] && m[55];
+	ok &= hfi_send(4, m, 59, 0) == 0;
+
+	/* 2. BW_TABLE (id 3, 160 dwords): a740_build_bw_table single entry */
+	for (int i = 0; i < 160; i++)
+		m[i] = 0;
+	m[1] = 1;			/* bw_level_num */
+	m[2] = 1;			/* cnoc_cmds_num */
+	m[3] = 3;			/* ddr_cmds_num */
+	m[4] = 1;			/* cnoc_wait_bitmask */
+	m[5] = 7;			/* ddr_wait_bitmask */
+	m[6] = rpmh_cmddb_addr("CN0");	/* cnoc_cmds_addrs[0] */
+	m[12] = 0x40000000u;		/* cnoc_cmds_data[0][0] */
+	m[18] = 0x60000001u;		/* cnoc_cmds_data[1][0] */
+	m[24] = rpmh_cmddb_addr("SH0");	/* ddr_cmds_addrs[0..2] */
+	m[25] = rpmh_cmddb_addr("MC0");
+	m[26] = rpmh_cmddb_addr("ACV");
+	m[32] = m[33] = m[34] = 0x40000000u;	/* ddr_cmds_data[0][0..2] */
+	con_hex2("BW addr", "cn0=", m[6], "sh0=", m[24]);
+	con_hex2("BW addr", "mc0=", m[25], "acv=", m[26]);
+	ok &= hfi_send(3, m, 160, 0) == 0;
+
+	/* 3. CORE_FW_START (id 14), 4. START (id 10) */
+	m[1] = 0;
+	ok &= hfi_send(14, m, 2, 0) == 0;
+	ok &= hfi_send(10, m, 1, 0) == 0;
+
+	/* 5. GX_BW_PERF_VOTE (id 30): blocking ack, perf index 1 = 220 MHz, no bw vote */
+	m[1] = 1;
+	m[2] = 1;
+	m[3] = 0;
+	ok &= hfi_send(30, m, 4, 0) == 0;
+
+	con_hex2("GPU3 gmu", "info=", rd(GMU2HOST_INTR_INFO), "rpmhst=", rd(0x03d7e3b0));
+	con_hex2("GPU3 gmu", "gxstat=", rd(0x03d7e340), "logwp=", rd(0x03d7e738));
+	con_str("GPU3 RESULT", ok ? "5 acks: HFI up" : "HFI failed");
+}
+
 /* RSC/PDC sequencer microcode, KGSL gen7_load_rsc_ucode / gen7_load_pdc_ucode (A740 values), between
  * GMU start and HFI start (review finding 4; docs/dm3q/gpu/PROBE2-REVIEW.md) */
 static void gpu2_rsc_pdc(void)
@@ -828,6 +972,14 @@ void gpu2_probe(void)
 		uint32_t us = poll(0x03d7e600, 1, 1, 50000);
 		con_hex2("P5 HFI", "status=", rd(0x03d7e600), "us=", us);
 		results[0] = us != ~0u ? 'o' : 'X';
+#if defined(DIAG_GPU3)
+		if (us != ~0u) {
+			hfi_pa = hfi;
+			gpu3_hfi();
+			wr(0x03d7e000, 1);	/* stop the M3 */
+			return;
+		}
+#endif
 	}
 	con_hex2("P5 GEN", "g0=", rd(0x03d7e714), "g9 logwp=", rd(0x03d7e738));
 	con_hex2("P5 log", "w0=", rd(log), "w1=", rd(log + 4));
