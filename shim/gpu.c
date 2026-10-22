@@ -765,7 +765,12 @@ static void gpu5_cp(void)
 	l2[0] = l2[1] = 0;
 	map_ap = 1u << 6;
 	uint64_t ring = map(VA_RING, 0x8000), mem = map(VA_MEMPTRS, 0x1000), pwr = map(VA_PWRUP, 0x2000);
-	uint64_t sqe = map(VA_SQE, 0x13000), test = map(VA_TEST, 0x1000);
+	/* the SQE microcode is fetched as a privileged instruction (APRIV ICACHE): AP 00, or the implicit
+	 * PXN of an unprivileged-writable page faults it (gpu5 photo: FSR 0x408 FAR 0x1000B000 FSYNR0 0x63) */
+	map_ap = 0;
+	uint64_t sqe = map(VA_SQE, 0x13000);
+	map_ap = 1u << 6;
+	uint64_t test = map(VA_TEST, 0x1000);
 	(void)pwr;	/* power-up reglist left empty (fallback A): no preemption/IFPC here */
 	uint32_t sqe_bytes = (uint32_t)(_sqe_fw_end - _sqe_fw_start);
 	copy_words(sqe, _sqe_fw_start + 4, sqe_bytes - 4);	/* the microcode starts after the 4-byte header */

@@ -528,6 +528,10 @@
   NEXT: probe 5 = GPU SMMU context for SIDs 0/1/2 (same CB code, unprivileged pages + HUPCF), GX register init
   (STAGES-3PLUS s6), SQE (a740_sqe.fw from byte 4) + ring + CP_ME_INIT; then zap shader (required: sailfish saw
   TRUST_CNTL write reset the phone and CP_SET_SECURE_MODE 0 without zap hang the CP) and CP_MEM_WRITE.
+  **gpu5 (photo):** GPU SMMU CB0 SCTLR 0x127 + SMR1 SID 0 accepted, GX init readbacks OK (CACHE_WAYS 0x800000, CMDQ
+  0x6690e), SQE started (always-on counter running, HW_FAULT 0), but ME_INIT never consumed: GPU CB FSR 0x408 FAR
+  0x1000B000 (= SQE VA) FSYNR0 0x63 -> privileged instruction fetch permission fault (same implicit PXN as the GMU):
+  SQE pages must be AP=00. CP_INTERRUPT_STATUS 0x80, CP_STATUS_1 0x80000006, RBBM_STATUS 0x00800005. gpu5b: SQE AP=00.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
