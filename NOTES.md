@@ -541,6 +541,16 @@
   as FAULT, the first CP fetch reset the phone" -> unmatched-stream GLOBAL faults are fatal (context faults are not:
   gpu2/gpu5 PF faults did not reset). Linux/phone DT give the GPU SIDs 0 AND 1; we routed only 0. gpu5d: SMR for
   SID 1 -> CB0 as well (never SID 2 = TZ gfx3d_secure).
+  **🎉🎉🎉🎉 ADRENO 740 EXECUTES OUR COMMANDS (gpu5d, 2026-10-21 ~23:50, photo):** with GPU SID 1 routed to CB0 next to
+  SID 0 (unmatched SID 1 = fatal global fault = the gpu5b/5c resets), after the TZ SMMU-aperture SCM call (accepted):
+  SQE runs (HW_FAULT 0), CP_ME_INIT consumed at once (rptr 0x0A), then PKT4 CP_SCRATCH(2)=0xC0DE0001 read back,
+  CP_MEM_WRITE 0xCAFEF00D landed in DDR (carve-out page via the GPU SMMU), CACHE_CLEAN fence = 1, rptr shadow 0x17.
+  RBBM_SECVID_TRUST_CNTL still 1 (secure mode, no zap) and memory writes work anyway (as on ios-sailfish).
+  Full working order is in shim/gpu.c gpu2_probe -> gpu3_hfi -> gpu4_gx_on -> gpu5_cp (DIAG=gpu5).
+  Lessons: AP=00 for anything fetched as privileged instructions (GMU code, SQE ucode), AP=01 for GPU data;
+  SIDs 0+1 -> one CB, never SID 2; HFI acks of this fw = {type 1, own id}. NEXT: zap shader (PAS 13, region
+  0x9b09a000, a740_zap.mbn segment @0x1000 len 0x430) + CP_SET_SECURE_MODE 0, then move the bring-up into XNU
+  (driver + user client for Turnip, KGSL-XNU-DESIGN.md / SAILFISH-LESSONS.md).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
