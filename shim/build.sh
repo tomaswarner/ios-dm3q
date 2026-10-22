@@ -10,12 +10,12 @@ OBJCOPY=${CROSS:-aarch64-elf-}objcopy
 MKBOOTIMG="python3 ../../tools/mkbootimg/mkbootimg.py"
 CFLAGS="${DIAG:+-DDIAG_$(echo $DIAG | tr a-z A-Z)} ${LOGGREP_PAT:+-DLOGGREP_PAT=\"$LOGGREP_PAT\"} -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
 mkdir -p out
-for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c rpmh.c ufsphy.c touch.c perf.c usb.c; do
+for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c rpmh.c ufsphy.c touch.c perf.c usb.c gpu.c; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
 done
 # The image runs wherever ABL puts it with no relocation pass: only the
 # header's image_size (start.o, linked at 0) may be an absolute address.
-abs=$(${CROSS:-aarch64-elf-}readelf -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/rpmh.o out/ufsphy.o out/touch.o out/perf.o out/usb.o | grep -c ABS64 || true)
+abs=$(${CROSS:-aarch64-elf-}readelf -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/rpmh.o out/ufsphy.o out/touch.o out/perf.o out/usb.o out/gpu.o | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
 # xnu payload (tools/mkpayload.py) if given as $1; without one the shim runs its diagnostics
 if [ -n "${1:-}" ]; then
@@ -24,8 +24,11 @@ else
 	printf '\t.section .payload, "a"\n' > out/payload.S
 fi
 $CC $CFLAGS -c out/payload.S -o out/payload.o
+# The phone's own GMU firmware, for the GPU probe (DIAG=gpu): blocks loaded into the GMU TCM
+printf '\t.section .rodata.gmufw, "a"\n\t.balign 4\n\t.global _gmu_fw_start\n_gmu_fw_start:\n\t.incbin "%s"\n\t.global _gmu_fw_end\n_gmu_fw_end:\n' "$(cd ../../firmware/adreno-DYDC && pwd)/gmu_gen70200.bin" > out/gmufw.S
+$CC $CFLAGS -c out/gmufw.S -o out/gmufw.o
 $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
-	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/rpmh.o out/ufsphy.o out/touch.o out/perf.o out/usb.o out/payload.o \
+	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/rpmh.o out/ufsphy.o out/touch.o out/perf.o out/usb.o out/gpu.o out/gmufw.o out/payload.o \
 	-o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # ABL copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.

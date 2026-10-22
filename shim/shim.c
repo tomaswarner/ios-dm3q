@@ -12,6 +12,7 @@
 #include "loader.h"
 #include "ufs.h"
 #include "touch.h"
+#include "gpu.h"
 #include "perf.h"
 #include "usb.h"
 
@@ -440,6 +441,8 @@ void shim_main(uint64_t dtb)
 	touch_probe();		/* dm3q: STM touch over QUP1 SE4 SPI (build with DIAG=touch) */
 #elif defined(DIAG_USB)
 	usb_probe();		/* dm3q: USB state left by ABL, read only (build with DIAG=usb) */
+#elif defined(DIAG_GPU)
+	gpu_probe();		/* dm3q: Adreno 740 probe 1, CX power + GMU TCM (build with DIAG=gpu) */
 #else
 	test_ufs_linux();	/* dm3q: ABL powers UFS down at exit; full re-init like U-Boot */
 	ufs_logview();		/* then show xnu's persistent console log from userdata */
