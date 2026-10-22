@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/sweet_input.c b/bsd/dev/sweet_input.c
+index c8932ca..c5071cb 100644
+--- a/bsd/dev/sweet_input.c
++++ b/bsd/dev/sweet_input.c
+@@ -82,7 +82,8 @@ SYSCTL_PROC(_kern, OID_AUTO, sweet_input, CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_
+  * Read-only probe of the SPMI PMIC arbiter at the phone DT's own addresses (qcom,spmi@c42d000:
+  * cnfg 0xc42d000, core 0xc400000, chnls 0xc500000, obsrvr 0xc440000), Linux spmi-pmic-arb v7 layout:
+  * version at core+0, PPID->APID table at core+0x2000+4n (bits 19:8 PPID, bit 31 valid? logged raw),
+- * owner at cnfg+0x700+4n, observer channel obsrvr+0x1000*apid (CMD 0, STATUS 8, RDATA0 0x18).
++ * owner at cnfg+0x700+4n, observer channel obsrvr+0x80*apid (CMD 0, STATUS 8, RDATA0 0x18; x36g used
++ * 0x1000*apid: apid 565 fell past the 512 KiB region -> kernel data abort).
+  * Logs what the reboot-to-Download write needs (SID 0 PPID 0x071 = PMK8550 SDAM, reg 0x48). No writes
+  * but the one-byte EXT_READL command to the observer channel.
+  */
+@@ -124,7 +125,11 @@ spmi_v7_probe(void)
+ 		printf("SWEET SPMI7: ppid 0x071 not mapped\n");
+ 		return;
+ 	}
+-	vm_offset_t ch = obs + 0x1000u * (unsigned)apid;
++	if ((unsigned)apid * 0x80u + 0x80u > 0x80000u) {
++		printf("SWEET SPMI7: apid %d outside the observer region\n", apid);
++		return;
++	}
++	vm_offset_t ch = obs + 0x80u * (unsigned)apid;
+ 	*(volatile uint32_t *)ch = (1u << 27) | (0x48u << 4);   /* EXT_READL reg 0x48, 1 byte */
+ 	__asm__ volatile ("dsb osh" ::: "memory");
+ 	for (int i = 0; i < 1000; i++) {
