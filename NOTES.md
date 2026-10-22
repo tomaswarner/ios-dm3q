@@ -637,6 +637,14 @@
   - State (boot x33g, Turnip flag on): UI on the Adreno, smoother than lavapipe; lock screen clock/date/camera OK;
     widgets drawn (shapes) but content black; wallpaper black; a black rectangle glitch during some transitions;
     kernel IOSurface plane facts do not reach IOSurface.framework (bpr 0, wrong plane offsets): fix in 0046 code.
+  **🎉 HANDS-OFF LOOP (2026-10-22 ~12:40):** xnu 0127 `kern.sweet_reboot=download` (SDAM 0x7148 <- 0x2A over
+  SPMI v7: arbiter 0x70000001, PPID 0x071 -> APID 565 owner EE0, observer obsrvr+0x20*apid like sweet_keys.c,
+  write channel chnls 0xc500000+0x1000*apid, read-back verified; TZ dload cookie clear; PSCI reset) put the
+  phone into Download Mode from iOS, samloader flashed right after. `tools/phone-flash.sh IMG` = reboot to
+  Download + flash + wait. Tools: sm_shot.py (screenshot), sm_input (touch/keys), sm_log (whole persistent
+  boot log over USB, needs 0123), sm_reboot. Still manual: USB cable replug after boot (0127's soft
+  disconnect/connect x6 does not reach the host: SM8550 eUSB2 repeater); x36g's SPMI probe panic (0x1000 stride)
+  fixed in 0126b. Boot images now: x38g = kernel out-local-0127 + payload x38s (3 GiB, sweetnull +chronod).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
