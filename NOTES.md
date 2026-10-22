@@ -486,6 +486,20 @@
   level since x12s and there is no thermal driver (only hardware LMh/DCVSH + PMIC shutdown), and lavapipe
   ran 6 threads flat out for minutes. Before the next Metal run: fewer lavapipe threads (2-3), no pinned max
   CPU (mid EPSS level or ABL's), a TSENS temperature readout in the log, and short sessions.
+  **🎉 ADRENO 740 PROBE 1 PASSED (2026-10-21 ~22:30, shim DIAG=gpu, `shim/gpu.c`, images dm3q-gpu1/1b/1c):**
+  design `docs/dm3q/gpu/A740-POWERON.md`. S1 cmd-db ARC tables (cx/mx/mxc levels 0,16,64,128,192,256,320,384,416,
+  480; gfx different), S3 RPMh votes cx idx5=256 / mx,mxc idx3=128 rc 0, S6 CX GDSC on in 7 us (F822F800), DEMET
+  + GMU clocks running on XO (CX_GMU 0x2001), S8 GMU window alive with no reset: CM3 SYSRESET=1, CM3_CFG=0x4052
+  already (ABL/Android left it), rpmh state 0xF, GBIF side0 0x70620, PDC gpuen 0x101; S9 GMU TCM pattern OK and
+  the phone's gmu_gen70200.bin TCM blocks loaded (3 blocks, 0x87 words, 0 mismatch; data blocks carry type
+  0xdeadbeef - load every sized block like Linux): ITCM sp 0x10007F80 reset 0x105, FW version 0x40010009 (v4.1.9),
+  pwr 0x40000011, HFI 0x20050000. S4: GCC GPU CBCRs keep CLK_OFF=1 after enable yet GPU_CC/GMU work (open).
+  S10: IS_CALL_AVAIL(PAS auth/init) = 1, but PAS_IS_SUPPORTED answers 0 for 13 (GPU) AND 1/4/18 (adsp/modem/
+  cdsp) -> query not meaningful here (Gunyah/TZ); zap feasibility still open. GPU_INIT_REGS not available.
+  Console clips at the bottom: probe pages with con_clear. NEXT GPU: probe 2 = kgsl-smmu survey + context bank
+  for GMU SID 5 + DDR carve-out for the fw main block (0x4000, 0x10210) + SYSRESET=0 + FW_INIT_RESULT/HFI.
+  Turnip for iOS built (`tools/turnip-ios`, docs/dm3q/gpu/TURNIP-IOS.md); blocker: XNU char-device mmap for
+  /dev/kgsl-3d0. Boot x22s (xnu 0110 thermal guard out-dm3q-012 + Metal) built, not flashed yet.
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the
