@@ -1,0 +1,159 @@
+diff --git a/src/freedreno/vulkan/meson.build b/src/freedreno/vulkan/meson.build
+index b019710..6ad7cdb 100644
+--- a/src/freedreno/vulkan/meson.build
++++ b/src/freedreno/vulkan/meson.build
+@@ -199,6 +199,13 @@ if cpp.get_id() == 'gcc'
+   tu_cpp_args += cpp.get_supported_arguments(['-Wno-misleading-indentation'])
+ endif
+ 
++# TURNIP-IOS: Darwin ld64 rejects the weak/optional tu_* entrypoints (and weak vk_/wsi_ stubs) left
++# undefined; same approach as src/kosmickrisp/vulkan/meson.build. Import check in TURNIP-IOS.md.
++tu_darwin_link_args = []
++if host_machine.system() == 'darwin'
++  tu_darwin_link_args += ['-Wl,-undefined,dynamic_lookup', '-lz']
++endif
++
+ libvulkan_freedreno = shared_library(
+   'vulkan_freedreno',
+   [libtu_files, tu_drirc, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h, bvh_spv],
+@@ -226,7 +233,7 @@ libvulkan_freedreno = shared_library(
+   c_args : [no_override_init_args, tu_flags, soong_compat_c_args],
+   cpp_args : [tu_cpp_args, tu_flags, soong_compat_cpp_args],
+   gnu_symbol_visibility : 'hidden',
+-  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
++  link_args : [vulkan_icd_link_args, tu_darwin_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
+   link_depends : vulkan_icd_link_depends,
+   install : true,
+ )
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 4f15084..bf6ff5e 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3217,7 +3217,11 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+                                  "pthread condattr init");
+       goto fail_timeline_cond;
+    }
++#ifdef __APPLE__ /* TURNIP-IOS: Darwin has no pthread_condattr_setclock; cond uses CLOCK_REALTIME, waiter converts (tu_knl_kgsl.cc) */
++   if (false) {
++#else
+    if (pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC) != 0) {
++#endif
+       pthread_condattr_destroy(&condattr);
+       result = vk_startup_errorf(physical_device->instance,
+                                  VK_ERROR_INITIALIZATION_FAILED,
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index 5580ed8..ebf5700 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -35,6 +35,21 @@
+ #define KGSL_ION_SYSTEM_HEAP_MASK (1u << 25)
+ 
+ 
++/* TURNIP-IOS: KGSL mmap convention is file offset = gpumem id << PAGE_SHIFT with the Linux
++ * 4K PAGE_SHIFT. XNU's mmap() rejects (EINVAL) file offsets that are not aligned to the 16K
++ * user page size, so on Apple the id is shifted by 14 instead; the /dev/kgsl-3d0 emulation must
++ * decode id = offset >> 14 (see TURNIP-IOS.md). */
++#ifdef __APPLE__
++#define KGSL_MMAP_ID_SHIFT 14
++#else
++#define KGSL_MMAP_ID_SHIFT 12
++#endif
++static inline uint64_t
++kgsl_mmap_offset(uint32_t id)
++{
++   return (uint64_t)id << KGSL_MMAP_ID_SHIFT;
++}
++
+ static int
+ safe_ioctl(int fd, unsigned long request, void *arg)
+ {
+@@ -190,7 +205,7 @@ bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t si
+ static VkResult
+ kgsl_bo_user_map(struct tu_device *dev, struct tu_bo *bo, uint64_t client_iova)
+ {
+-   uint64_t offset = bo->gem_handle << 12;
++   uint64_t offset = kgsl_mmap_offset(bo->gem_handle);
+    void *map = mmap(reinterpret_cast<void *>(client_iova), bo->size, PROT_READ | PROT_WRITE,
+                     MAP_SHARED, dev->physical_device->local_fd, offset);
+    if (map == MAP_FAILED) {
+@@ -284,6 +299,14 @@ kgsl_bo_init(struct tu_device *dev,
+              const char *name)
+ {
+    if (flags & TU_BO_ALLOC_SHAREABLE) {
++#ifdef __APPLE__
++      /* TURNIP-IOS STUB: exportable (dma-buf) memory needs /dev/dma_heap/system or /dev/ion,
++       * which do not exist on iOS. */
++      if (dev->physical_device->kgsl_dma_fd < 0)
++         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                          "turnip-ios: exportable/dma-buf memory unsupported on iOS "
++                          "(no dma_heap/ion device)");
++#endif
+       /* The Vulkan spec doesn't forbid allocating exportable memory with a
+        * fixed address, only imported memory, but on kgsl we can't sensibly
+        * implement it so just always reject it.
+@@ -386,6 +409,11 @@ kgsl_bo_init_dmabuf(struct tu_device *dev,
+                     enum tu_bo_alloc_flags flags,
+                     int fd)
+ {
++#ifdef __APPLE__
++   /* TURNIP-IOS STUB: dma-buf import (KGSL_USER_MEM_TYPE_DMABUF) has no iOS equivalent. */
++   return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                    "turnip-ios: dma-buf import unsupported on iOS");
++#endif
+    struct kgsl_gpuobj_import_dma_buf import_dmabuf = {
+       .fd = fd,
+    };
+@@ -460,7 +488,7 @@ kgsl_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
+ {
+    void *map = MAP_FAILED;
+    if (bo->shared_fd == -1) {
+-      uint64_t offset = bo->gem_handle << 12;
++      uint64_t offset = kgsl_mmap_offset(bo->gem_handle);
+       map = mmap(placed_addr, bo->size, PROT_READ | PROT_WRITE,
+                  MAP_SHARED | (placed_addr != NULL ? MAP_FIXED : 0),
+                  dev->physical_device->local_fd, offset);
+@@ -778,6 +806,22 @@ kgsl_syncobj_dup(struct tu_device *device, const struct kgsl_syncobj *s, struct
+ static int
+ timestamp_to_fd(struct tu_queue *queue, uint32_t timestamp)
+ {
++#ifdef __APPLE__
++   /* TURNIP-IOS STUB: KGSL_TIMESTAMP_EVENT_FENCE returns a Linux sync_file fd (kernel fence
++    * object + SYNC_IOC_* ioctls). iOS/XNU has no sync_file, so fail with a clear error.
++    * Callers turn this into VK_ERROR_* "KGSL timestamp fence creation failed: Function not
++    * implemented"; plain single-queue timestamp waits (the normal path) do not need it. */
++   {
++      static bool warned;
++      if (!warned) {
++         warned = true;
++         mesa_loge("turnip-ios: sync_file fences are not available on iOS "
++                   "(timestamp -> fd export/merge/cross-queue wait unsupported)");
++      }
++      errno = ENOSYS;
++      return -1;
++   }
++#endif
+    int fd;
+    struct kgsl_timestamp_event event = {
+       .type = KGSL_TIMESTAMP_EVENT_FENCE,
+@@ -926,7 +970,21 @@ kgsl_syncobj_wait(struct tu_device *device,
+ 
+       pthread_mutex_lock(&device->submit_mutex);
+       struct timespec abstime;
++#ifdef __APPLE__
++      /* TURNIP-IOS: cond var is CLOCK_REALTIME on Darwin; convert the monotonic deadline */
++      {
++         struct timespec now_rt, now_mono;
++         clock_gettime(CLOCK_REALTIME, &now_rt);
++         clock_gettime(CLOCK_MONOTONIC, &now_mono);
++         uint64_t now_rt_ns = (uint64_t)now_rt.tv_sec * 1000000000ull + now_rt.tv_nsec;
++         uint64_t now_mono_ns = (uint64_t)now_mono.tv_sec * 1000000000ull + now_mono.tv_nsec;
++         uint64_t rel = abs_timeout_ns > now_mono_ns ? abs_timeout_ns - now_mono_ns : 0;
++         if (abs_timeout_ns != UINT64_MAX)
++            timespec_from_nsec(&abstime, now_rt_ns + rel);
++      }
++#else
+       timespec_from_nsec(&abstime, abs_timeout_ns);
++#endif
+ 
+       while (s->state == KGSL_SYNCOBJ_STATE_UNSIGNALED) {
+          int ret;
