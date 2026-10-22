@@ -500,6 +500,14 @@
   for GMU SID 5 + DDR carve-out for the fw main block (0x4000, 0x10210) + SYSRESET=0 + FW_INIT_RESULT/HFI.
   Turnip for iOS built (`tools/turnip-ios`, docs/dm3q/gpu/TURNIP-IOS.md); blocker: XNU char-device mmap for
   /dev/kgsl-3d0. Boot x22s (xnu 0110 thermal guard out-dm3q-012 + Metal) built, not flashed yet.
+  **GPU probe 2 (gpu2, 2026-10-21 ~23:00, 2 photos):** after CX is up the GCC GPU CBCRs read running (memnoc 3,
+  axi 0x300003: the probe-1 CLK_OFF was only "CX still off"). kgsl-smmu ours: sCR0 0x002D0406 (CLIENTPD 0), IDR0
+  0x4C017E18 (24 SMRs, S1TS, SMS), IDR1 0x40000016 (4K pages, 32 global pages, 22 CBs, 0 S2-only), IDR2 0x5511
+  (OAS 36-bit -> PASIZE 1), no valid SMRs left by ABL, CB base 0x03dc0000. Programmed CB 21 (SCTLR 0x27, CBAR
+  0x1F316) + SMR0 0x80000005 / S2CR 0x15; carve 0x900000000 (0x6F000 used), fw code 0x10210 B copied. GMU release:
+  FW_INIT_RESULT stays 0; CB FSR 0x408 (PF, AArch64), FAR 0x4000, FSYNR0 0x63 = privileged instruction fetch
+  permission fault at the fw's first DDR instruction: pages were AP=01 (EL0-writable -> implicit PXN). gpu2b: AP=00
+  (privileged RW, as IOMMU_PRIV). Review doc docs/dm3q/gpu/PROBE2-REVIEW.md (map() consecutive pages fix etc).
   For backboardd system-wide: kernel nub (flash BOOT with 0109 + sweetmetal=1), or inject MTLAddDevice
   into backboardd (launchd env, needs a reboot).
   NEXT: the

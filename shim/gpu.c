@@ -539,8 +539,11 @@ static uint64_t map(uint64_t va, uint64_t size)
 	for (uint64_t o = 0; o < size; o += 0x1000) {
 		uint64_t pa = carve_page();
 		uint64_t l3 = l3_for(va + o);
-		/* page: AF, inner shareable, AP 01 (RW any EL), AttrIndx 0 (MAIR0 attr0) */
-		wr64(l3 + 8 * (((va + o) >> 12) & 0x1ff), pa | (1u << 10) | (3u << 8) | (1u << 6) | 3);
+		/* page: AF, inner shareable, AP 00 (RW privileged only), AttrIndx 0 (MAIR0 attr0). Not AP 01:
+		 * a page writable unprivileged is implicitly PXN, and the GMU fetches privileged (gpu2 photo:
+		 * FSR 0x408 permission fault, FAR 0x4000, FSYNR0 0x63 = privileged instruction fetch, level 3).
+		 * Linux/KGSL map these regions IOMMU_PRIV. */
+		wr64(l3 + 8 * (((va + o) >> 12) & 0x1ff), pa | (1u << 10) | (3u << 8) | 3);
 	}
 	return pa0;
 }
