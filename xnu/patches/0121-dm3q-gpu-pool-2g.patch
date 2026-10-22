@@ -1,0 +1,55 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 327d912..768ebaf 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -48,7 +48,7 @@ uint32_t sweet_gpu_reg(uint32_t off);
+ static LCK_GRP_DECLARE(sg_grp, "sweet_gpu");
+ static LCK_MTX_DECLARE(sg_ring_mtx, &sg_grp);    /* ring contents, wptr */
+ 
+-#define HANDOFF_PA      0x9c0100000ULL
++#define HANDOFF_PA      0x980100000ULL   /* shim CARVE + 1 MiB (shim/gpu.c; was 0x9c0100000 while xnu had 4 GiB) */
+ #define HANDOFF_MAGIC   0x3034374155504753ULL   /* "SGPUA740" */
+ #define GMU_PA          0x03d7c000u             /* GMU CX block: HFI, OOB, AHB fence */
+ #define GMU_SIZE        0x24000u
+diff --git a/bsd/dev/sweet_kgsl.c b/bsd/dev/sweet_kgsl.c
+index 3328404..2108a33 100644
+--- a/bsd/dev/sweet_kgsl.c
++++ b/bsd/dev/sweet_kgsl.c
+@@ -1005,13 +1005,21 @@ sweet_kgsl_init(void)
+ 		printf("SWEET KGSL: mapping/alloc failed\n");
+ 		return;
+ 	}
++	/* one L2 table per GiB of pool, at the start of block 0 (+0x1000 each, below the memstore at +0x4000):
++	 * 2 MiB blocks, AF | inner shareable | AP=01 (GPU data) | AttrIndx 0 (NC) */
+ 	unsigned i1 = (unsigned)((POOL_GPUVA >> 30) & 0x1ff);
+-	if (rd64(l1 + 8u * i1) & 1u) {
+-		printf("SWEET KGSL: GPU L1[%u] already used (%llx)\n", i1, rd64(l1 + 8u * i1));
+-		return;
++	unsigned nl2 = (unsigned)((k.pool_size + (1ull << 30) - 1) >> 30);
++	if (nl2 > 4) {
++		nl2 = 4;
++		k.pool_size = 4ull << 30;
++	}
++	for (unsigned j = 0; j < nl2; j++) {
++		if (rd64(l1 + 8u * (i1 + j)) & 1u) {
++			printf("SWEET KGSL: GPU L1[%u] already used (%llx)\n", i1 + j, rd64(l1 + 8u * (i1 + j)));
++			return;
++		}
+ 	}
+-	/* L2 at the start of block 0: 2 MiB blocks, AF | inner shareable | AP=01 (GPU data) | AttrIndx 0 (NC) */
+-	for (unsigned i = 0; i < 512; i++) {
++	for (unsigned i = 0; i < 512 * nl2; i++) {
+ 		uint64_t pa = k.pool + (uint64_t)i * BLOCK;
+ 		wr64(k.blk0 + 8u * i, (uint64_t)i * BLOCK < k.pool_size ?
+ 		    (pa | (1u << 10) | (3u << 8) | (1u << 6) | 1u) : 0);
+@@ -1020,7 +1028,9 @@ sweet_kgsl_init(void)
+ 		wr32(k.blk0 + MEMSTORE_OFF + 16u * c, 0);
+ 	}
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+-	wr64(l1 + 8u * i1, k.pool | 3u);                /* table descriptor */
++	for (unsigned j = 0; j < nl2; j++) {
++		wr64(l1 + 8u * (i1 + j), (k.pool + 0x1000u * j) | 3u);  /* table descriptors */
++	}
+ 	/* host window: its L2 table, attr1 = cacheable in MAIR0 (attr0 NC unchanged) */
+ 	uint64_t hl2;
+ 	k.host_l2 = table_page(&hl2);

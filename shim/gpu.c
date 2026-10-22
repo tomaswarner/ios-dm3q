@@ -486,10 +486,12 @@ void gpu_probe(void)
 #define CB_TLBSTATUS	0x7f4
 
 #define GMU_SID		5
-/* DDR bank 0x8_c0000000-0xa_00000000; xnu's RAM ends at 0x9_bcc00000 (tools/mkadt.py HIGH_*), so 0x9_c0000000
- * stays ours for good: 1 MiB used here (tables, firmware, ring), then the handoff page, then a pool for xnu's
- * GPU driver (page tables, buffers) up to GPU_RESERVE_END. */
-#define CARVE		0x9c0000000UL
+/* DDR bank 0x8_c0000000-0xa_00000000. xnu gets 3 GiB of it (ADT dram-size 0xc0000000, like the iPhone X it
+ * plays; was 0xfcc00000 up to 0x9_bcc00000), so 0x9_80000000 up stays ours for good: 1 MiB used here (tables,
+ * firmware, ring), then the handoff page, then the pool for xnu's GPU driver (page tables, buffers) up to
+ * GPU_RESERVE_END: ~2 GiB (1 GiB filled up under CoreAnimation). The handoff address moves with CARVE: the
+ * kernel finds it at CARVE + CARVE_SIZE (sweet_gpu.c HANDOFF_PA). */
+#define CARVE		0x980000000UL
 #define CARVE_SIZE	0x100000UL	/* 1 MiB: tables + firmware + regions */
 #define HANDOFF		(CARVE + CARVE_SIZE)
 #define GPU_POOL	(CARVE + 0x200000UL)
