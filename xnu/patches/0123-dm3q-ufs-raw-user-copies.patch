@@ -1,0 +1,40 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 33d8313..d530952 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -415,6 +415,10 @@ sweet_ufs_strategy(buf_t bp)
+ 	uint64_t part_bytes = su.nblocks * UFS_BLOCK;
+ 
+ 	bool rd = buf_flags(bp) & B_READ;
++	/* raw (character) device I/O through physio: the buffer is the caller's user memory, reached
++	 * with copyin/copyout from this thread (strategy runs in the caller's context), never memcpy
++	 * (a user read of /dev/rufsroot0 panicked: kernel data abort in memcpy, PAN) */
++	bool user = buf_flags(bp) & B_PHYS;
+ 
+ 	buf_setresid(bp, count);
+ 	if (!rd && !su.writable) {
+@@ -443,7 +447,9 @@ sweet_ufs_strategy(buf_t bp)
+ 		void *bounce = (void *)(su.dma + DMA_BOUNCE);
+ 		if (rd) {
+ 			error = ufs_read_blocks(su.first_block + lba, blocks);
+-			if (!error) {
++			if (!error && user) {
++				error = copyout((const char *)bounce + skip, (user_addr_t)(uintptr_t)(vaddr + done), want);
++			} else if (!error) {
+ 				memcpy(vaddr + done, (const char *)bounce + skip, want);
+ 			}
+ 		} else {
+@@ -451,8 +457,12 @@ sweet_ufs_strategy(buf_t bp)
+ 			if (skip || (want % UFS_BLOCK)) {
+ 				error = ufs_read_blocks(su.first_block + lba, blocks);
+ 			}
+-			if (!error) {
++			if (!error && user) {
++				error = copyin((user_addr_t)(uintptr_t)(vaddr + done), (char *)bounce + skip, want);
++			} else if (!error) {
+ 				memcpy((char *)bounce + skip, vaddr + done, want);
++			}
++			if (!error) {
+ 				error = ufs_write_blocks(su.first_block + lba, blocks);
+ 			}
+ 		}
