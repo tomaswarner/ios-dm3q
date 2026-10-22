@@ -599,10 +599,17 @@ MISSING_LOGGER
 - (uint64_t)recommendedMaxWorkingSetSize { return 2ull << 30; }
 - (NSUInteger)maxBufferLength { return 1ull << 30; }
 
-/* iPhone X (A11) answers the Apple4 family. */
+/* iPhone X (A11) answers the Apple4 family. In chronod (widget snapshots) Apple2 at most: RenderBox
+ * picks its two-plane '_RB4' (RGB8_444_2P) layer format from Apple3 on (RB::Device's family count,
+ * docs/dm3q/RB4-FORMAT.md section 6), which metal2vulkan cannot render to (empty widgets); with two
+ * families it renders BGRA8. Only there: QuartzCore takes other paths from the same answer. */
 - (BOOL)supportsFamily:(MTLGPUFamily)family
 {
-	return (family >= MTLGPUFamilyApple1 && family <= MTLGPUFamilyApple4) || family == MTLGPUFamilyCommon1 ||
+	static int chronod = -1;
+	if (chronod < 0)
+		chronod = !strcmp(getprogname(), "chronod");
+	MTLGPUFamily top = chronod ? MTLGPUFamilyApple2 : MTLGPUFamilyApple4;
+	return (family >= MTLGPUFamilyApple1 && family <= top) || family == MTLGPUFamilyCommon1 ||
 	       family == MTLGPUFamilyCommon2;
 }
 

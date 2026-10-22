@@ -1,0 +1,79 @@
+diff --git a/bsd/dev/sweet_input.c b/bsd/dev/sweet_input.c
+index e1da9e9..c8932ca 100644
+--- a/bsd/dev/sweet_input.c
++++ b/bsd/dev/sweet_input.c
+@@ -78,12 +78,73 @@ sweet_input_sysctl SYSCTL_HANDLER_ARGS
+ SYSCTL_PROC(_kern, OID_AUTO, sweet_input, CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_LOCKED, NULL, 0,
+     sweet_input_sysctl, "A", "DM3Q synthetic touch / key input");
+ 
++/*
++ * Read-only probe of the SPMI PMIC arbiter at the phone DT's own addresses (qcom,spmi@c42d000:
++ * cnfg 0xc42d000, core 0xc400000, chnls 0xc500000, obsrvr 0xc440000), Linux spmi-pmic-arb v7 layout:
++ * version at core+0, PPID->APID table at core+0x2000+4n (bits 19:8 PPID, bit 31 valid? logged raw),
++ * owner at cnfg+0x700+4n, observer channel obsrvr+0x1000*apid (CMD 0, STATUS 8, RDATA0 0x18).
++ * Logs what the reboot-to-Download write needs (SID 0 PPID 0x071 = PMK8550 SDAM, reg 0x48). No writes
++ * but the one-byte EXT_READL command to the observer channel.
++ */
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++static uint32_t
++rd32(vm_offset_t a)
++{
++	uint32_t v = *(volatile uint32_t *)a;
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++spmi_v7_probe(void)
++{
++	vm_offset_t core = ml_io_map(0xc400000, 0x4000), cnfg = ml_io_map(0xc42d000, 0x4000);
++	vm_offset_t obs = ml_io_map(0xc440000, 0x80000);
++	if (!core || !cnfg || !obs) {
++		printf("SWEET SPMI7: map failed\n");
++		return;
++	}
++	uint32_t ver = rd32(core);
++	printf("SWEET SPMI7: arbiter version 0x%08x (v7 >= 0x70000000)\n", ver);
++	if (ver < 0x70000000u || ver >= 0x80000000u) {
++		return;
++	}
++	int apid = -1;
++	for (unsigned n = 0; n < 1024; n++) {
++		uint32_t m = rd32(core + 0x2000 + 4 * n);
++		if (((m >> 8) & 0xfffu) == 0x071u) {
++			printf("SWEET SPMI7: ppid 0x071 -> apid %u (map 0x%08x, owner 0x%08x)\n", n, m,
++			    rd32(cnfg + 0x700 + 4 * n));
++			if (apid < 0) {
++				apid = (int)n;
++			}
++		}
++	}
++	if (apid < 0) {
++		printf("SWEET SPMI7: ppid 0x071 not mapped\n");
++		return;
++	}
++	vm_offset_t ch = obs + 0x1000u * (unsigned)apid;
++	*(volatile uint32_t *)ch = (1u << 27) | (0x48u << 4);   /* EXT_READL reg 0x48, 1 byte */
++	__asm__ volatile ("dsb osh" ::: "memory");
++	for (int i = 0; i < 1000; i++) {
++		uint32_t st = rd32(ch + 8);
++		if (st & 1u) {
++			printf("SWEET SPMI7: SDAM 0x7148 = 0x%02x (status 0x%x)\n", rd32(ch + 0x18) & 0xffu, st);
++			return;
++		}
++		delay(1);
++	}
++	printf("SWEET SPMI7: SDAM read timeout\n");
++}
++
+ void
+ sweet_input_report(void)
+ {
+ 	uint8_t rr = 0;
+ 	int r = sweet_spmi_init() ? -1 : sweet_spmi_read(0, 0x7148, &rr);
+-	printf("SWEET INPUT: kern.sweet_input ready; pon restart reason (SDAM 0x7148) %s 0x%02x\n",
++	printf("SWEET INPUT: kern.sweet_input ready; pon restart reason (SDAM 0x7148, old reader) %s 0x%02x\n",
+ 	    r ? "unreadable" : "=", rr);
++	spmi_v7_probe();
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
