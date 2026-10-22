@@ -759,6 +759,8 @@ void gpu2_probe(void)
 	/* page 3 (the console clips at the bottom) */
 	{
 		uint32_t sctlr = rd(c + CB_SCTLR), smr = rd(SMMU + SMMU_SMR(slot));
+		con_str("PHOTO", "page 2 now: page 3 in 10 s");
+		udelay(10000000);
 		con_clear(0xff004000U);
 		con_str("GPU2 page 3", "GMU boot (page 2: smmu)");
 		con_hex2("P2 summary", "cb/slot=", cb << 16 | slot, "sctlr=", sctlr);
